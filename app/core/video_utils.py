@@ -44,15 +44,18 @@ class VideoMetadata:
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    run_kwargs: dict[str, Any] = {
+        "check": True,
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
     try:
-        return subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        return subprocess.run(command, **run_kwargs)
     except FileNotFoundError as exc:
         raise MediaToolError(
             f"Required media tool was not found: {command[0]}. "

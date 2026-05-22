@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -89,6 +91,53 @@ class TaskWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class TaskProgressDialog(QDialog):
+    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(label)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setMinimumWidth(460)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel(label)
+        title.setObjectName("PanelTitle")
+
+        self.message_label = QLabel("Preparing...")
+        self.message_label.setWordWrap(True)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setMinimumHeight(12)
+
+        self.detail_view = QTextEdit()
+        self.detail_view.setReadOnly(True)
+        self.detail_view.setMaximumHeight(128)
+        self.detail_view.setPlaceholderText("Progress details will appear here.")
+
+        note = QLabel("Keep StoryCut AI open while the export is running.")
+        note.setWordWrap(True)
+
+        layout.addWidget(title)
+        layout.addWidget(self.message_label)
+        layout.addWidget(self.progress_bar)
+        layout.addWidget(self.detail_view)
+        layout.addWidget(note)
+
+    def set_message(self, message: str) -> None:
+        text = str(message or "").strip()
+        if not text:
+            return
+        self.message_label.setText(text)
+        self.detail_view.append(text)
+        scrollbar = self.detail_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -100,6 +149,7 @@ class MainWindow(QMainWindow):
         self.project: ProjectData | None = None
         self.database: TranscriptDatabase | None = None
         self._workers: list[TaskWorker] = []
+        self._task_dialogs: dict[TaskWorker, TaskProgressDialog] = {}
         self._busy_count = 0
 
         self._build_ui()
@@ -229,6 +279,19 @@ class MainWindow(QMainWindow):
                 color: #64748b;
                 background: #111827;
                 border-color: #263244;
+            }
+            QDialog {
+                background: #0b1018;
+            }
+            QProgressBar {
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                min-height: 12px;
+            }
+            QProgressBar::chunk {
+                background: #2563eb;
+                border-radius: 5px;
             }
             QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
                 background: #0f172a;
@@ -777,8 +840,23 @@ class MainWindow(QMainWindow):
     def _build_indonesian_subtitle_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(scroll_area, 1)
+
+        content = QWidget()
+        scroll_area.setWidget(content)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 14, 14, 24)
+        content_layout.setSpacing(12)
 
         settings = QGroupBox("Generate Subtitle Indonesia from Video Audio")
+        settings.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         settings_layout = QFormLayout(settings)
         settings_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         settings_layout.setHorizontalSpacing(14)
@@ -821,7 +899,7 @@ class MainWindow(QMainWindow):
 
         self.subtitle_status_view = QTextEdit()
         self.subtitle_status_view.setReadOnly(True)
-        self.subtitle_status_view.setMinimumHeight(180)
+        self.subtitle_status_view.setMinimumHeight(260)
         self.subtitle_status_view.setPlaceholderText(
             "Subtitle status and output path will appear here."
         )
@@ -844,9 +922,12 @@ class MainWindow(QMainWindow):
         settings_layout.addRow("SRT output", output_row)
         settings_layout.addRow("", self.generate_id_subtitle_button)
 
-        layout.addWidget(settings)
-        layout.addWidget(QLabel("Status"))
-        layout.addWidget(self.subtitle_status_view, 1)
+        content_layout.addWidget(settings, 0)
+        content_layout.addWidget(QLabel("Status"))
+        content_layout.addWidget(self.subtitle_status_view, 0)
+        bottom_safe_space = QWidget()
+        bottom_safe_space.setFixedHeight(96)
+        content_layout.addWidget(bottom_safe_space, 0)
         return page
 
     def _build_script_tab(self) -> QWidget:
@@ -1943,31 +2024,61 @@ class MainWindow(QMainWindow):
         on_success: Callable[[Any], None],
     ) -> None:
         worker = TaskWorker(task, self)
-        worker.progress.connect(lambda message: self._log(message, persist=False))
-        worker.succeeded.connect(lambda result: self._task_succeeded(result, on_success))
-        worker.failed.connect(self._task_failed)
+        progress_dialog = TaskProgressDialog(label, self)
+        self._task_dialogs[worker] = progress_dialog
+
+        worker.progress.connect(lambda message, active_worker=worker: self._task_progress(active_worker, message))
+        worker.succeeded.connect(
+            lambda result, active_worker=worker: self._task_succeeded(
+                active_worker,
+                result,
+                on_success,
+            )
+        )
+        worker.failed.connect(lambda message, active_worker=worker: self._task_failed(active_worker, message))
         worker.finished.connect(lambda: self._task_finished(worker))
         self._workers.append(worker)
         self._set_busy(True)
         self.statusBar().showMessage(label)
-        self._log(label, persist=False)
+        self._task_progress(worker, label)
+        progress_dialog.show()
         worker.start()
 
-    def _task_succeeded(self, result: Any, on_success: Callable[[Any], None]) -> None:
+    def _task_progress(self, worker: TaskWorker, message: str) -> None:
+        dialog = self._task_dialogs.get(worker)
+        if dialog:
+            dialog.set_message(message)
+        self._log(message, persist=False)
+
+    def _task_succeeded(
+        self,
+        worker: TaskWorker,
+        result: Any,
+        on_success: Callable[[Any], None],
+    ) -> None:
+        self._close_task_dialog(worker)
         try:
             on_success(result)
         except Exception as exc:
             self._show_error(str(exc))
 
-    def _task_failed(self, message: str) -> None:
+    def _task_failed(self, worker: TaskWorker, message: str) -> None:
+        self._close_task_dialog(worker)
         self._show_error(message)
         self._log(f"Error: {message}")
 
     def _task_finished(self, worker: TaskWorker) -> None:
         if worker in self._workers:
             self._workers.remove(worker)
+        self._close_task_dialog(worker)
         self._set_busy(False)
         self.statusBar().showMessage("Ready", 4000)
+
+    def _close_task_dialog(self, worker: TaskWorker) -> None:
+        dialog = self._task_dialogs.pop(worker, None)
+        if dialog:
+            dialog.close()
+            dialog.deleteLater()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy_count += 1 if busy else -1
