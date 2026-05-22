@@ -8,7 +8,7 @@ The app does not include features for bypassing copyright detection, evading Con
 
 - Create, save, and load local projects from a chosen `.storycut.json` location.
 - Refresh the currently loaded project from disk with `Refresh Project` or `F5` without restarting the app.
-- Import large video files by path without copying the source media.
+- Import large Video Ori files by path without copying the source media.
 - Read duration, file size, resolution, FPS, codecs, and audio availability with FFprobe.
 - Extract mono WAV audio with FFmpeg for transcription.
 - Transcribe audio locally with faster-whisper and save timestamped segments to SQLite.
@@ -18,20 +18,22 @@ The app does not include features for bypassing copyright detection, evading Con
 - Extract visual scene frames with FFmpeg for manual scene notes.
 - Draft visual scene notes automatically with an optional local BLIP vision model.
 - Search transcript text and view results in a table.
-- Add transcript segments to an editable cut list.
-- Visually preview the imported video, scrub the timeline, mark in/out points, and add cuts like a conventional video editor.
+- Use the `File` menu for New Project, Open Project, Save Project, Import Video Ori, and Export Video.
+- Work in an editor-style layout with Video Ori preview, rough-cut preview, Manual Clips, and the main timeline.
+- Add transcript segments or visual selections into Manual Clips.
+- Visually preview the imported Video Ori, scrub the timeline, mark in/out points, and save manual cuts.
 - Edit clip start and end timestamps manually.
-- Apply a visual timeline selection directly to an existing cut list row.
-- Export selected clips with FFmpeg.
-- Build one chronological random rough-cut video from short source clips.
-- Select a source video range for rough-cut export with a draggable range slider.
-- Export multiple rough-cut parts from different source ranges, then combine the finished parts into one MP4.
-- Keep rough-cut source clips at five seconds or shorter.
-- Use a short conflict video clip from the source as the rough-cut hook.
+- Drag Manual Clips into the main rough-cut timeline, reorder them, split them, delete them, and trim them to the current Video Ori selection.
+- Preview selected timeline clips and export the final timeline as MP4 with resolution, FPS, bitrate, output name, and save location settings.
+- Build one chronological random rough-cut video from short Video Ori clips.
+- Build a rough-cut timeline from Video Ori using the draggable range slider.
+- Export multiple rough-cut parts from different Video Ori ranges, then combine the finished parts into one MP4.
+- Keep rough-cut Video Ori clips at five seconds or shorter.
+- Use a short conflict video clip from Video Ori as the rough-cut hook.
 - Fill each scene with nearby video snippets instead of repeating one clip when possible.
 - Add light zoom, alternating mirror, fade transitions, and color grading for review pacing.
-- Mute source audio by default and optionally replace it with a selected royalty-free music file.
-- Set a target final duration for rough-cut exports, with a 10-15 minute recap workflow in mind.
+- Mute Video Ori audio by default and optionally replace it with a selected royalty-free music file.
+- Set the rough-cut target duration as a percentage of the full Video Ori or selected Video Ori range.
 - Generate a local rule-based YouTube narration draft in Bahasa Indonesia or English.
 - Generate a ready-to-read Indonesian movie plot recap script from transcript text and optional visual scene notes.
 - Save generated narration scripts as `.txt`.
@@ -85,11 +87,13 @@ The app does not require paid APIs or web services. faster-whisper runs locally.
 
 The script generator can output an Indonesian draft. The `Alur Cerita Film` mode cleans transcript/subtitle text into a ready-to-read recap narration, similar to Indonesian movie recap scripts. It is rule-based, so it works best when the transcript already contains narration or Indonesian subtitle text. Raw foreign-language audio should be paired with Indonesian subtitles, then use `Extract ID Subtitles`, `Import Subtitle File`, or `OCR Burned Subtitles`.
 
-For visual clip editing, use the `Visual Cut` tab. Import a video, scrub the preview timeline, click `Mark In` and `Mark Out`, then click `Add Cut` to place that range in the cut list. Selecting an existing cut row loads its range back into the visual editor, so you can adjust the start/end points and click `Apply to Selected`.
+For visual clip editing, use the `Editor` tab. Import Video Ori, scrub the Video Ori preview, click `Mark In` and `Mark Out`, then click `Save Manual Clip` to place that range in `Manual Clips`. Manual Clips stay in that panel until you drag them into the main timeline or click `Add to Timeline`.
 
-For visual rough cuts, use the `Rough Cut` tab. It samples source clips at five seconds or shorter, keeps them in chronological order, puts a short conflict video clip at the start, fills each scene with nearby snippets so it has enough narration space, targets an approximate final duration, and exports one MP4. Use `Source Range` to render only a portion of the source video first, for example minute 10 to minute 25. Export another range afterward, then use `Combine Parts` to merge the finished rough-cut parts. The rough-cut controls can add light zoom, alternating mirror, fade transitions, and color grading for review/storytelling rhythm. Source audio is muted by default; choose a royalty-free music file if you want a new background track. These tools are provided for original commentary, review, and education, not for hiding or disguising copyrighted footage.
+The main timeline is non-destructive: every rough-cut or manual clip still points back to Video Ori timestamps. You can drag Manual Clips into the start, middle, end, or between existing timeline clips, reorder timeline rows, split a selected clip, delete clips, zoom the timeline rows, and trim a selected timeline clip to the current Video Ori selection.
 
-Set `Target final duration` above zero when you want a specific output length. In that mode, the app calculates how many scenes are needed from the target duration and trims the final export to that target. `Max clips` is only used when `Target final duration` is `0 min`.
+For visual rough cuts, use the `Rough Cut` tab. It samples Video Ori clips at five seconds or shorter, keeps them in chronological order, puts a short conflict video clip at the start, fills each scene with nearby snippets so it has enough narration space, targets an approximate final duration, and exports one MP4. Use `Video Ori Range` to render or build only a portion of Video Ori first, for example minute 10 to minute 25. Export another range afterward, then use `Combine Parts` to merge the finished rough-cut parts. The rough-cut controls can add light zoom, alternating mirror, fade transitions, and color grading for review/storytelling rhythm. Video Ori audio is muted by default; choose a royalty-free music file if you want a new background track. These tools are provided for original commentary, review, and education, not for hiding or disguising copyrighted footage.
+
+Set `Target %` to make the final rough-cut duration proportional to the selected Video Ori range. For example, `12%` of a 100-minute full Video Ori becomes a 12-minute target, while `12%` of a selected 30-minute Video Ori range becomes a 3.6-minute target. `Target duration` is calculated automatically from that percentage. `Max clips` is only used when the calculated target duration is `0 min`.
 
 For automatic visual notes, install local vision support, then use `Auto Describe Empty Notes` in the `Scenes` tab. The app fills empty notes from the extracted thumbnails and keeps them editable. Notes you already typed are preserved.
 
@@ -170,13 +174,13 @@ Click `Refresh Project` or press `F5` to reload the currently opened `.storycut.
 ## Basic Workflow
 
 1. Click `New Project`, enter a name, then choose where to save the `.storycut.json` project file.
-2. Click `Import Video`.
-3. Confirm metadata appears in the Media panel.
-4. Open `Visual Cut`, scrub the video preview, use `Mark In` / `Mark Out`, then click `Add Cut`.
-5. Select a cut row to load its range back into the visual editor, adjust it, then click `Apply to Selected`.
-6. Select cut list rows and click `Export Selected Clips`.
-7. Open `Rough Cut`, drag `Source Range` to choose the source section, keep `Clip length` at `5 sec`, set `Target final duration`, then click `Export Rough Cut Video`.
-8. Repeat with the next source range when needed, then click `Combine Parts` to merge the finished rough-cut outputs.
+2. Use `File -> Import Video Ori`.
+3. Confirm metadata appears in the Video Ori panel.
+4. Open `Rough Cut`, drag `Video Ori Range`, set `Target %`, then click `Build Timeline`.
+5. In `Editor`, scrub Video Ori, use `Mark In` / `Mark Out`, then click `Save Manual Clip`.
+6. Drag Manual Clips into the main timeline wherever you want them, or select them and click `Add to Timeline`.
+7. Edit the timeline with split, delete, reorder, trim-to-Video-Ori-selection, zoom, undo, and redo.
+8. Set export resolution, FPS, bitrate, output file, then use `File -> Export Video` or the `Export Video` button.
 9. Open `Subtitle Indonesia` to generate Indonesian SRT subtitles from video audio when needed.
 
 ## Timestamp Format
@@ -223,6 +227,6 @@ If you bundle FFmpeg this way, update the app later to resolve the packaged bina
 - Add optional speaker labels when a reliable local diarization path is chosen.
 - Add subtitle export formats such as `.srt` and `.vtt`.
 - Add batch clip export presets.
-- Add project-level media relinking when a source video moves.
+- Add project-level media relinking when Video Ori moves.
 - Add more advanced local script outlining while keeping creator commentary central.
 - Add automated tests around timestamp parsing, project persistence, and FFmpeg command generation.

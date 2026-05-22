@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -37,11 +38,12 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core.audio_utils import extract_audio
-from app.core.cutter import ClipItem, export_clips
+from app.core.cutter import ClipItem, export_clips, export_timeline_video, extract_clip_thumbnail
 from app.core.database import TranscriptDatabase
 from app.core.montage import (
     ROUGH_CUT_COLOR_GRADES,
     RoughCutConfig,
+    build_rough_cut_plan,
     build_conflict_hook,
     combine_rough_cut_parts,
     detect_conflict_hook_segment,
@@ -70,8 +72,10 @@ from app.gui.widgets import (
     ChecklistWidget,
     CutListTable,
     LogPanel,
+    ManualClipTable,
     RoughCutRangeSelector,
     SceneNotesTable,
+    TimelineClipTable,
     TranscriptTable,
     VideoCutEditorWidget,
 )
@@ -158,24 +162,37 @@ class MainWindow(QMainWindow):
         self._workers: list[TaskWorker] = []
         self._task_dialogs: dict[TaskWorker, TaskProgressDialog] = {}
         self._busy_count = 0
+        self._editor_undo_stack: list[dict[str, Any]] = []
+        self._editor_redo_stack: list[dict[str, Any]] = []
+        self._restoring_editor_history = False
 
         self._build_ui()
         self.refresh_shortcut = QShortcut(QKeySequence("F5"), self)
         self.refresh_shortcut.activated.connect(self.refresh_project)
+        self.undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self.undo_shortcut.activated.connect(self.undo_editor_change)
+        self.redo_shortcut = QShortcut(QKeySequence.StandardKey.Redo, self)
+        self.redo_shortcut.activated.connect(self.redo_editor_change)
+        self._reset_editor_history()
         self._set_project_label()
         self.statusBar().showMessage("Ready")
 
     def _build_ui(self) -> None:
         self._apply_modern_theme()
+        self._build_file_menu()
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
-        layout.addWidget(self._build_project_group())
-        layout.addWidget(self._build_media_group())
+        self.project_group = self._build_project_group()
+        self.project_group.hide()
+        self.media_group = self._build_media_group()
+        self.media_group.hide()
+        self.project_status_label = QLabel("No project loaded")
+        self.statusBar().addPermanentWidget(self.project_status_label, 1)
 
         self.tabs = QTabWidget()
         self.cuts_tab = self._build_cuts_tab()
@@ -187,7 +204,7 @@ class MainWindow(QMainWindow):
         self.checklist_tab = self._build_checklist_tab()
         self.logs_tab = self._build_logs_tab()
 
-        self.tabs.addTab(self.cuts_tab, "Visual Cut")
+        self.tabs.addTab(self.cuts_tab, "Editor")
         self.tabs.addTab(self.rough_cut_tab, "Rough Cut")
         self.tabs.addTab(self.subtitle_tab, "Subtitle Indonesia")
         self._hidden_pages = [
@@ -209,11 +226,44 @@ class MainWindow(QMainWindow):
             self.extract_subtitle_button,
             self.ocr_subtitle_button,
             self.export_button,
+            self.export_manual_clips_button,
+            self.build_timeline_rough_cut_button,
+            self.build_rough_timeline_button,
             self.export_rough_cut_button,
             self.combine_rough_parts_button,
             self.generate_id_subtitle_button,
             self.refresh_project_button,
         ]
+
+    def _build_file_menu(self) -> None:
+        self.menuBar().clear()
+        file_menu = self.menuBar().addMenu("File")
+
+        self.new_project_action = QAction("New Project", self)
+        self.open_project_action = QAction("Open Project", self)
+        self.save_project_action = QAction("Save Project", self)
+        self.import_video_ori_action = QAction("Import Video Ori", self)
+        self.read_metadata_action = QAction("Read Video Ori Metadata", self)
+        self.refresh_project_action = QAction("Refresh Project", self)
+        self.export_video_action = QAction("Export Video", self)
+
+        self.new_project_action.triggered.connect(self.new_project)
+        self.open_project_action.triggered.connect(self.load_project)
+        self.save_project_action.triggered.connect(lambda: self.save_project(show_message=True))
+        self.import_video_ori_action.triggered.connect(self.import_video)
+        self.read_metadata_action.triggered.connect(self.read_metadata)
+        self.refresh_project_action.triggered.connect(self.refresh_project)
+        self.export_video_action.triggered.connect(self.export_final_video)
+
+        file_menu.addAction(self.new_project_action)
+        file_menu.addAction(self.open_project_action)
+        file_menu.addAction(self.save_project_action)
+        file_menu.addAction(self.refresh_project_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.import_video_ori_action)
+        file_menu.addAction(self.read_metadata_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_video_action)
 
     def _apply_modern_theme(self) -> None:
         self.setStyleSheet(
@@ -290,6 +340,32 @@ class MainWindow(QMainWindow):
             }
             QDialog {
                 background: #0b1018;
+            }
+            QMenuBar {
+                background: #0b1018;
+                color: #e5e7eb;
+                border-bottom: 1px solid #263244;
+            }
+            QMenuBar::item {
+                background: transparent;
+                padding: 6px 12px;
+            }
+            QMenuBar::item:selected {
+                background: #172033;
+                border-radius: 4px;
+            }
+            QMenu {
+                background: #111827;
+                border: 1px solid #263244;
+                color: #e5e7eb;
+                padding: 6px;
+            }
+            QMenu::item {
+                padding: 7px 28px 7px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #2563eb;
             }
             QProgressBar {
                 background: #0f172a;
@@ -433,7 +509,7 @@ class MainWindow(QMainWindow):
 
         self.project_label = QLabel()
         self.new_project_button = QPushButton("New Project")
-        self.load_project_button = QPushButton("Load Project")
+        self.load_project_button = QPushButton("Open Project")
         self.refresh_project_button = QPushButton("Refresh Project")
         self.refresh_project_button.setToolTip("Reload current project from disk (F5)")
         self.save_project_button = QPushButton("Save Project")
@@ -451,13 +527,13 @@ class MainWindow(QMainWindow):
         return group
 
     def _build_media_group(self) -> QGroupBox:
-        group = QGroupBox("Video Source")
+        group = QGroupBox("Video Ori")
         outer = QHBoxLayout(group)
 
         controls = QWidget()
         controls_layout = QFormLayout(controls)
 
-        self.import_video_button = QPushButton("Import Video")
+        self.import_video_button = QPushButton("Import Video Ori")
         self.metadata_button = QPushButton("Read Metadata")
         self.extract_audio_button = QPushButton("Extract Audio")
         self.transcribe_button = QPushButton("Transcribe")
@@ -545,7 +621,7 @@ class MainWindow(QMainWindow):
         self.import_subtitle_button = QPushButton("Import Subtitle File")
         self.extract_subtitle_button = QPushButton("Extract ID Subtitles")
         self.ocr_subtitle_button = QPushButton("OCR Burned Subtitles")
-        self.add_to_cut_button = QPushButton("Add Selected to Cut List")
+        self.add_to_cut_button = QPushButton("Add Selected to Manual Clips")
 
         self.search_button.clicked.connect(self.search_transcript)
         self.show_all_button.clicked.connect(self.show_all_transcript)
@@ -572,54 +648,152 @@ class MainWindow(QMainWindow):
 
     def _build_cuts_tab(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        layout.addWidget(scroll_area, 1)
+        page_layout.addWidget(scroll_area, 1)
 
         content = QWidget()
+        content.setMinimumHeight(1040)
         scroll_area.setWidget(content)
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(14, 14, 14, 24)
-        content_layout.setSpacing(12)
 
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(10, 10, 10, 28)
+        layout.setSpacing(8)
+
+        video_ori_group = QGroupBox("Video Ori Preview")
+        video_ori_group.setMinimumHeight(610)
+        video_ori_layout = QVBoxLayout(video_ori_group)
+        video_ori_layout.setContentsMargins(10, 18, 10, 10)
+        video_ori_layout.setSpacing(8)
         self.visual_cut_editor = VideoCutEditorWidget()
-        self.visual_cut_editor.setMinimumHeight(420)
-        self.visual_cut_editor.setMaximumHeight(560)
+        self.visual_cut_editor.setMinimumHeight(570)
+        self.visual_cut_editor.video_widget.setMinimumHeight(330)
+        self.visual_cut_editor.video_widget.setMaximumHeight(380)
+        self.visual_cut_editor.add_clip_button.setText("Save Manual Clip")
+        self.visual_cut_editor.apply_clip_button.setText("Update Manual")
         self.visual_cut_editor.addClipRequested.connect(self.add_visual_cut_to_list)
         self.visual_cut_editor.updateClipRequested.connect(self.apply_visual_range_to_selected_cut)
-        content_layout.addWidget(self.visual_cut_editor, 0)
+        video_ori_layout.addWidget(self.visual_cut_editor, 1)
+        layout.addWidget(video_ori_group, 0)
 
-        cut_panel = QGroupBox("Cut List")
-        cut_layout = QVBoxLayout(cut_panel)
-        cut_layout.setContentsMargins(12, 22, 12, 12)
-        cut_layout.setSpacing(10)
+        editor_split = QSplitter(Qt.Orientation.Horizontal)
+        editor_split.setChildrenCollapsible(False)
+        editor_split.setMinimumHeight(380)
 
-        row = QHBoxLayout()
-        self.remove_cut_button = QPushButton("Remove Selected")
-        self.export_button = QPushButton("Export Selected Clips")
-        self.export_button.setObjectName("PrimaryButton")
+        manual_panel = QGroupBox("Manual Clips")
+        manual_layout = QVBoxLayout(manual_panel)
+        manual_layout.setContentsMargins(10, 18, 10, 10)
+        manual_layout.setSpacing(8)
+        manual_toolbar = QHBoxLayout()
+        self.add_manual_to_timeline_button = QPushButton("Add to Timeline")
+        self.remove_cut_button = QPushButton("Remove Manual")
+        self.export_manual_clips_button = QPushButton("Export Manual Clips")
+        self.add_manual_to_timeline_button.clicked.connect(self.add_selected_manual_clips_to_timeline)
         self.remove_cut_button.clicked.connect(self.remove_selected_cuts)
-        self.export_button.clicked.connect(self.export_selected_clips)
-        row.addStretch(1)
-        row.addWidget(self.remove_cut_button)
-        row.addWidget(self.export_button)
-        cut_layout.addLayout(row)
-
-        self.cut_table = CutListTable()
-        self.cut_table.setMinimumHeight(280)
+        self.export_manual_clips_button.clicked.connect(self.export_selected_clips)
+        manual_toolbar.addWidget(self.add_manual_to_timeline_button)
+        manual_toolbar.addWidget(self.remove_cut_button)
+        manual_toolbar.addStretch(1)
+        manual_toolbar.addWidget(self.export_manual_clips_button)
+        manual_layout.addLayout(manual_toolbar)
+        self.cut_table = ManualClipTable()
+        self.cut_table.setMinimumWidth(360)
         self.cut_table.itemSelectionChanged.connect(self.preview_selected_cut_range)
-        cut_layout.addWidget(self.cut_table, 1)
+        self.cut_table.itemChanged.connect(self._on_editor_manual_changed)
+        manual_layout.addWidget(self.cut_table, 1)
 
-        content_layout.addWidget(cut_panel, 0)
-        bottom_safe_space = QWidget()
-        bottom_safe_space.setFixedHeight(96)
-        content_layout.addWidget(bottom_safe_space, 0)
+        timeline_panel = QGroupBox("Main Timeline - Rough Cut")
+        timeline_layout = QVBoxLayout(timeline_panel)
+        timeline_layout.setContentsMargins(10, 18, 10, 10)
+        timeline_layout.setSpacing(8)
+
+        timeline_toolbar = QHBoxLayout()
+        self.build_timeline_rough_cut_button = QPushButton("Build Rough Cut Timeline")
+        self.preview_timeline_clip_button = QPushButton("Preview Selected")
+        self.trim_timeline_clip_button = QPushButton("Trim to Video Ori Selection")
+        self.split_timeline_clip_button = QPushButton("Split")
+        self.delete_timeline_clip_button = QPushButton("Delete")
+        self.timeline_zoom_out_button = QPushButton("Zoom -")
+        self.timeline_zoom_in_button = QPushButton("Zoom +")
+        self.undo_editor_button = QPushButton("Undo")
+        self.redo_editor_button = QPushButton("Redo")
+        self.export_button = QPushButton("Export Video")
+        self.export_button.setObjectName("PrimaryButton")
+        self.build_timeline_rough_cut_button.clicked.connect(self.build_rough_cut_timeline)
+        self.preview_timeline_clip_button.clicked.connect(self.preview_selected_timeline_clip)
+        self.trim_timeline_clip_button.clicked.connect(self.trim_selected_timeline_to_video_ori_selection)
+        self.split_timeline_clip_button.clicked.connect(self.split_selected_timeline_clip)
+        self.delete_timeline_clip_button.clicked.connect(self.delete_selected_timeline_clips)
+        self.timeline_zoom_out_button.clicked.connect(lambda: self.adjust_timeline_zoom(-0.2))
+        self.timeline_zoom_in_button.clicked.connect(lambda: self.adjust_timeline_zoom(0.2))
+        self.undo_editor_button.clicked.connect(self.undo_editor_change)
+        self.redo_editor_button.clicked.connect(self.redo_editor_change)
+        self.export_button.clicked.connect(self.export_final_video)
+        for button in (
+            self.build_timeline_rough_cut_button,
+            self.preview_timeline_clip_button,
+            self.trim_timeline_clip_button,
+            self.split_timeline_clip_button,
+            self.delete_timeline_clip_button,
+            self.timeline_zoom_out_button,
+            self.timeline_zoom_in_button,
+            self.undo_editor_button,
+            self.redo_editor_button,
+        ):
+            timeline_toolbar.addWidget(button)
+        timeline_toolbar.addStretch(1)
+        timeline_toolbar.addWidget(self.export_button)
+        timeline_layout.addLayout(timeline_toolbar)
+
+        export_row = QWidget()
+        export_layout = QHBoxLayout(export_row)
+        export_layout.setContentsMargins(0, 0, 0, 0)
+        export_layout.setSpacing(8)
+        self.export_resolution_combo = QComboBox()
+        self.export_resolution_combo.addItems(["1280x720", "1920x1080", "854x480", "Original"])
+        self.export_fps_spin = QDoubleSpinBox()
+        self.export_fps_spin.setRange(0.0, 120.0)
+        self.export_fps_spin.setDecimals(3)
+        self.export_fps_spin.setSingleStep(1.0)
+        self.export_fps_spin.setSpecialValueText("Original")
+        self.export_fps_spin.setValue(30.0)
+        self.export_bitrate_input = QLineEdit("4500k")
+        self.export_bitrate_input.setPlaceholderText("e.g. 4500k")
+        self.export_output_input = QLineEdit()
+        self.export_output_input.setPlaceholderText("Choose final MP4 output path")
+        self.export_output_browse_button = QPushButton("Browse")
+        self.export_output_browse_button.clicked.connect(self.choose_export_output_file)
+        self.timeline_total_label = QLabel("Timeline total: 00:00.000")
+        self.timeline_total_label.setMinimumWidth(190)
+        export_layout.addWidget(QLabel("Resolution"))
+        export_layout.addWidget(self.export_resolution_combo)
+        export_layout.addWidget(QLabel("FPS"))
+        export_layout.addWidget(self.export_fps_spin)
+        export_layout.addWidget(QLabel("Bitrate"))
+        export_layout.addWidget(self.export_bitrate_input)
+        export_layout.addWidget(QLabel("Output"))
+        export_layout.addWidget(self.export_output_input, 1)
+        export_layout.addWidget(self.export_output_browse_button)
+        export_layout.addWidget(self.timeline_total_label)
+        timeline_layout.addWidget(export_row, 0)
+
+        self.timeline_table = TimelineClipTable()
+        self.timeline_table.setMinimumHeight(260)
+        self.timeline_table.timelineChanged.connect(self._on_editor_timeline_changed)
+        self.timeline_table.clipActivated.connect(self.preview_timeline_clip)
+        timeline_layout.addWidget(self.timeline_table, 1)
+
+        editor_split.addWidget(manual_panel)
+        editor_split.addWidget(timeline_panel)
+        editor_split.setSizes([430, 900])
+        layout.addWidget(editor_split, 2)
         return page
 
     def _build_rough_cut_tab(self) -> QWidget:
@@ -669,6 +843,20 @@ class MainWindow(QMainWindow):
         self.rough_target_final_minutes_spin.setSingleStep(0.5)
         self.rough_target_final_minutes_spin.setValue(12.0)
         self.rough_target_final_minutes_spin.setSuffix(" min")
+        self.rough_target_final_minutes_spin.setReadOnly(True)
+        self.rough_target_final_minutes_spin.setToolTip(
+            "Calculated from Target % and the selected Video Ori range."
+        )
+        self.rough_target_percent_spin = QDoubleSpinBox()
+        self.rough_target_percent_spin.setRange(0.0, 100.0)
+        self.rough_target_percent_spin.setDecimals(1)
+        self.rough_target_percent_spin.setSingleStep(0.5)
+        self.rough_target_percent_spin.setValue(12.0)
+        self.rough_target_percent_spin.setSuffix(" %")
+        self.rough_target_percent_spin.setToolTip(
+            "Final rough-cut length as a percentage of the selected Video Ori range."
+        )
+        self.rough_target_percent_spin.valueChanged.connect(self._sync_rough_target_from_percent)
 
         self.rough_slow_every_spin = QSpinBox()
         self.rough_slow_every_spin.setRange(0, 20)
@@ -714,7 +902,7 @@ class MainWindow(QMainWindow):
         self.rough_video_hook_check.setChecked(True)
         self.rough_neighbor_fill_check = QCheckBox("Fill each scene with nearby clips")
         self.rough_neighbor_fill_check.setChecked(True)
-        self.rough_keep_audio_check = QCheckBox("Keep source audio/dialogue")
+        self.rough_keep_audio_check = QCheckBox("Keep Video Ori audio/dialogue")
         self.rough_keep_audio_check.setChecked(False)
 
         self.rough_music_path_input = QLineEdit()
@@ -740,13 +928,13 @@ class MainWindow(QMainWindow):
 
         self._polish_rough_cut_controls()
 
-        range_group = QGroupBox("Source Range")
+        range_group = QGroupBox("Video Ori Range")
         range_layout = QVBoxLayout(range_group)
         range_layout.setContentsMargins(14, 24, 14, 14)
         range_layout.setSpacing(10)
         self.rough_range_selector = RoughCutRangeSelector()
         self.rough_range_selector.rangeChanged.connect(self._rough_range_changed)
-        self.rough_range_label = QLabel("Import a video to choose the rough cut source range.")
+        self.rough_range_label = QLabel("Import Video Ori to choose the rough cut range.")
         self.rough_range_full_button = QPushButton("Use Full Video")
         self.rough_range_full_button.clicked.connect(self.use_full_rough_range)
         range_button_row = QHBoxLayout()
@@ -766,6 +954,7 @@ class MainWindow(QMainWindow):
         timing_layout.addRow("Sample every", self.rough_sample_every_spin)
         timing_layout.addRow("Hook clip", self.rough_hook_seconds_spin)
         timing_layout.addRow("Scene duration", self.rough_scene_output_seconds_spin)
+        timing_layout.addRow("Target %", self.rough_target_percent_spin)
         timing_layout.addRow("Target duration", self.rough_target_final_minutes_spin)
         timing_layout.addRow("Max clips", self.rough_max_clips_spin)
         timing_layout.addRow("Slowmo every", self.rough_slow_every_spin)
@@ -809,11 +998,14 @@ class MainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         self.suggest_hook_button = QPushButton("Suggest Conflict Hook")
+        self.build_rough_timeline_button = QPushButton("Build Timeline")
         self.export_rough_cut_button = QPushButton("Export Rough Cut Video")
         self.suggest_hook_button.clicked.connect(self.suggest_conflict_hook)
+        self.build_rough_timeline_button.clicked.connect(self.build_rough_cut_timeline)
         self.export_rough_cut_button.clicked.connect(self.export_rough_cut_video)
         button_row.addStretch(1)
         button_row.addWidget(self.suggest_hook_button)
+        button_row.addWidget(self.build_rough_timeline_button)
         button_row.addWidget(self.export_rough_cut_button)
 
         parts_group = QGroupBox("Rough Cut Parts")
@@ -860,6 +1052,7 @@ class MainWindow(QMainWindow):
             self.rough_max_clips_spin,
             self.rough_scene_output_seconds_spin,
             self.rough_target_final_minutes_spin,
+            self.rough_target_percent_spin,
             self.rough_slow_every_spin,
             self.rough_slow_factor_spin,
             self.rough_hook_seconds_spin,
@@ -1121,7 +1314,7 @@ class MainWindow(QMainWindow):
 
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import Video",
+            "Import Video Ori",
             str(Path.home()),
             "Video Files (*.mp4 *.mov *.mkv *.avi *.webm *.m4v);;All Files (*)",
         )
@@ -1131,10 +1324,16 @@ class MainWindow(QMainWindow):
         assert self.project is not None
         self.project.video_path = path
         self.project.metadata = None
+        self.project.manual_clips = []
+        self.project.timeline_clips = []
+        self.project.cut_list = []
+        self.cut_table.set_cut_items([])
+        self.timeline_table.set_timeline_clips([])
+        self._reset_editor_history()
         self.metadata_view.setText(metadata_to_text(None))
         self._refresh_visual_editor_video(0.0)
         self._refresh_rough_range_selector(0.0)
-        self._log(f"Imported video: {path}")
+        self._log(f"Imported Video Ori: {path}")
         self.save_project()
         self.read_metadata()
 
@@ -1494,17 +1693,21 @@ class MainWindow(QMainWindow):
         new_items: list[dict[str, Any]] = []
         for segment in selected:
             new_items.append(
+                self._with_clip_thumbnail(
                 {
                     "id": f"clip_{len(existing) + len(new_items) + 1:03d}_{uuid.uuid4().hex[:6]}",
                     "source_segment_id": segment.get("id"),
                     "start": format_duration(float(segment.get("start", 0.0))),
                     "end": format_duration(float(segment.get("end", 0.0))),
                     "text": segment.get("text", ""),
+                    "kind": "manual",
                 }
+                )
             )
 
         self.cut_table.set_cut_items(existing + new_items)
-        self._log(f"Added {len(new_items)} segment(s) to the cut list.")
+        self._log(f"Added {len(new_items)} segment(s) to Manual Clips.")
+        self._push_editor_history()
         self.save_project()
 
     def add_visual_cut_to_list(self, start: float, end: float, text: str) -> None:
@@ -1520,10 +1723,13 @@ class MainWindow(QMainWindow):
             "start": format_duration(start),
             "end": format_duration(end),
             "text": text,
+            "kind": "manual",
         }
+        item = self._with_clip_thumbnail(item)
         self.cut_table.set_cut_items(existing + [item])
         self.cut_table.selectRow(self.cut_table.rowCount() - 1)
-        self._log(f"Added visual cut: {item['start']} to {item['end']}.")
+        self._log(f"Saved Manual Clip: {item['start']} to {item['end']}.")
+        self._push_editor_history()
         self.save_project()
 
     def apply_visual_range_to_selected_cut(self, start: float, end: float) -> None:
@@ -1533,12 +1739,19 @@ class MainWindow(QMainWindow):
             self._show_warning("End time must be after start time.")
             return
 
+        selected_row = self.cut_table.currentRow()
         updated = self.cut_table.update_first_selected_range(start, end)
         if not updated:
-            self._show_warning("Select one cut list row first.")
+            self._show_warning("Select one Manual Clips row first.")
             return
 
+        items = self.cut_table.to_cut_items()
+        if 0 <= selected_row < len(items):
+            items[selected_row] = self._with_clip_thumbnail(items[selected_row])
+            self.cut_table.set_cut_items(items)
+            self.cut_table.selectRow(selected_row)
         self._log(f"Updated {updated.get('id', 'clip')} range: {updated['start']} to {updated['end']}.")
+        self._push_editor_history()
         self.save_project()
 
     def preview_selected_cut_range(self) -> None:
@@ -1559,9 +1772,10 @@ class MainWindow(QMainWindow):
     def remove_selected_cuts(self) -> None:
         removed = self.cut_table.remove_selected_rows()
         if not removed:
-            self._show_warning("Select one or more cut list rows first.")
+            self._show_warning("Select one or more Manual Clips rows first.")
             return
-        self._log(f"Removed {removed} cut list row(s).")
+        self._log(f"Removed {removed} Manual Clips row(s).")
+        self._push_editor_history()
         self.save_project()
 
     def export_selected_clips(self) -> None:
@@ -1570,7 +1784,7 @@ class MainWindow(QMainWindow):
 
         selected = self.cut_table.selected_cut_items()
         if not selected:
-            self._show_warning("Select one or more cut list rows to export.")
+            self._show_warning("Select one or more Manual Clips rows to export.")
             return
 
         assert self.project is not None
@@ -1597,6 +1811,387 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Export Complete", f"Exported {len(outputs)} clip(s).")
 
         self._start_task("Exporting clips", task, done)
+
+    def choose_export_output_file(self) -> None:
+        if not self._require_project():
+            return
+        assert self.project is not None
+        default_dir = Path(self.project.project_dir) / "exports"
+        default_dir.mkdir(exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Video",
+            str(default_dir / f"{self._safe_project_filename(self.project.name)}_final.mp4"),
+            "MP4 Video (*.mp4);;All Files (*)",
+        )
+        if path:
+            self.export_output_input.setText(str(Path(path).with_suffix(".mp4")))
+            self.save_project()
+
+    def add_selected_manual_clips_to_timeline(self) -> None:
+        if not self._require_project():
+            return
+        selected = self.cut_table.selected_cut_items()
+        if not selected:
+            self._show_warning("Select one or more Manual Clips first.")
+            return
+        self.timeline_table.append_clips(selected)
+        self._log(f"Added {len(selected)} Manual Clip(s) to the timeline.")
+        self.save_project()
+
+    def preview_timeline_clip(self, clip: dict[str, Any]) -> None:
+        if not self.project or not self.project.video_path:
+            return
+        try:
+            item = ClipItem.from_dict(clip)
+        except (TypeError, ValueError):
+            return
+        self.visual_cut_editor.set_clip_range(item.start, item.end, seek=True)
+        self.tabs.setCurrentWidget(self.cuts_tab)
+        self.statusBar().showMessage("Timeline clip loaded in Video Ori preview", 3000)
+
+    def preview_selected_timeline_clip(self) -> None:
+        clip = self.timeline_table.selected_timeline_clip()
+        if not clip:
+            self._show_warning("Select one timeline clip first.")
+            return
+        self.preview_timeline_clip(clip)
+
+    def trim_selected_timeline_to_video_ori_selection(self) -> None:
+        if not self._require_project():
+            return
+        start, end = self.visual_cut_editor._range_seconds()
+        if end <= start:
+            self._show_warning("Mark a valid range in Video Ori first.")
+            return
+        updated = self.timeline_table.update_selected_range(start, end)
+        if not updated:
+            self._show_warning("Select one timeline clip first.")
+            return
+        self._log(f"Trimmed timeline clip to {updated['start']} - {updated['end']}.")
+        self.save_project()
+
+    def split_selected_timeline_clip(self) -> None:
+        if not self.timeline_table.split_selected_clip():
+            self._show_warning("Select a timeline clip longer than 0.2 seconds first.")
+            return
+        self._log("Split selected timeline clip.")
+        self.save_project()
+
+    def delete_selected_timeline_clips(self) -> None:
+        removed = self.timeline_table.remove_selected_rows()
+        if not removed:
+            self._show_warning("Select one or more timeline clips first.")
+            return
+        self._log(f"Deleted {removed} timeline clip(s).")
+        self.save_project()
+
+    def adjust_timeline_zoom(self, delta: float) -> None:
+        self.timeline_table.set_zoom(self.timeline_table.zoom() + delta)
+
+    def build_rough_cut_timeline(self) -> None:
+        if not self._require_video():
+            return
+
+        assert self.project is not None
+        video_path = self.project.video_path
+        config = self._rough_cut_config()
+        transcript_records = self.database.fetch_segments() if self.database else []
+        thumb_dir = Path(self.project.project_dir) / "thumbnails"
+
+        def task(progress: Callable[[str], None]) -> list[dict[str, Any]]:
+            progress("Building rough cut timeline plan from Video Ori...")
+            segments = build_rough_cut_plan(video_path, config)
+            hook_segment = None
+            if config.use_video_hook:
+                hook_segment = detect_conflict_hook_segment(
+                    transcript_records,
+                    video_path,
+                    hook_seconds=config.hook_seconds,
+                    source_start_seconds=config.source_start_seconds,
+                    source_end_seconds=config.source_end_seconds,
+                )
+            if hook_segment is not None:
+                segments = [hook_segment] + segments
+
+            clips: list[dict[str, Any]] = []
+            target_remaining = max(0.0, float(config.target_final_seconds or 0))
+            for index, segment in enumerate(segments, start=1):
+                source_duration = max(0.1, segment.end - segment.start)
+                planned_duration = (
+                    source_duration
+                    if segment.index == 0
+                    else max(source_duration, float(config.scene_output_seconds or source_duration))
+                )
+                if target_remaining > 0:
+                    if target_remaining <= 0.05:
+                        break
+                    output_duration = min(planned_duration, target_remaining)
+                    target_remaining -= output_duration
+                else:
+                    output_duration = planned_duration
+                clip_id = f"rough_{index:03d}_{uuid.uuid4().hex[:6]}"
+                item = {
+                    "id": clip_id,
+                    "start": format_duration(segment.start),
+                    "end": format_duration(segment.end),
+                    "output_duration": round(output_duration, 3),
+                    "text": (
+                        f"Rough cut {format_duration(segment.start)} - {format_duration(segment.end)} "
+                        f"-> {format_duration(output_duration)}"
+                    ),
+                    "kind": "rough",
+                    "timeline_role": "hook" if segment.index == 0 else "scene",
+                }
+                thumb_path = thumb_dir / f"{clip_id}.jpg"
+                try:
+                    extract_clip_thumbnail(video_path, thumb_path, segment.start)
+                    item["thumbnail_path"] = str(thumb_path)
+                except Exception as exc:
+                    progress(f"Thumbnail skipped for {clip_id}: {exc}")
+                clips.append(item)
+            progress(f"Prepared {len(clips)} timeline clip(s).")
+            return clips
+
+        def done(clips: list[dict[str, Any]]) -> None:
+            self.timeline_table.set_timeline_clips(clips)
+            self._refresh_timeline_total_label()
+            self._push_editor_history()
+            self._log(f"Built rough cut timeline with {len(clips)} clip(s).")
+            self.save_project()
+            self.tabs.setCurrentWidget(self.cuts_tab)
+            self.statusBar().showMessage("Rough cut timeline built", 4000)
+
+        self._start_task("Building rough cut timeline", task, done)
+
+    def export_final_video(self) -> None:
+        if not self._require_video():
+            return
+
+        timeline = self._timeline_with_output_durations(self.timeline_table.timeline_clips())
+        if not timeline:
+            self._show_warning("Timeline is empty. Build a rough cut or drag Manual Clips into it first.")
+            return
+        self.timeline_table.set_timeline_clips(timeline)
+        self._refresh_timeline_total_label()
+        total_duration = self._timeline_total_duration(timeline)
+        total_clips = len(timeline)
+
+        if not self.export_output_input.text().strip():
+            self.choose_export_output_file()
+        output_path = self.export_output_input.text().strip()
+        if not output_path:
+            return
+
+        assert self.project is not None
+        video_path = self.project.video_path
+        resolution = self.export_resolution_combo.currentText()
+        fps = self.export_fps_spin.value()
+        bitrate = self.export_bitrate_input.text().strip()
+
+        def task(progress: Callable[[str], None]) -> str:
+            progress(
+                f"Exporting full Main Timeline: {total_clips} clip(s), "
+                f"total {format_duration(total_duration)}."
+            )
+            output = export_timeline_video(
+                video_path=video_path,
+                output_path=output_path,
+                clips=timeline,
+                resolution=resolution,
+                fps=fps,
+                bitrate=bitrate,
+                progress_callback=progress,
+            )
+            return str(output)
+
+        def done(path: str) -> None:
+            self._log(
+                f"Exported full Main Timeline: {total_clips} clip(s), "
+                f"{format_duration(total_duration)} -> {path}"
+            )
+            self.save_project()
+            QMessageBox.information(
+                self,
+                "Export Complete",
+                "Full Main Timeline exported.\n\n"
+                f"Clips: {total_clips}\n"
+                f"Timeline duration: {format_duration(total_duration)}\n"
+                f"Output:\n{path}",
+            )
+
+        self._start_task("Exporting final video", task, done)
+
+    def _timeline_with_output_durations(self, clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not clips:
+            return []
+
+        config = self._rough_cut_config()
+        target_remaining = max(0.0, float(config.target_final_seconds or 0))
+        scene_duration = max(0.1, float(config.scene_output_seconds or config.clip_seconds or 5))
+        hook_duration = max(0.1, float(config.hook_seconds or config.clip_seconds or 5))
+        seen_rough = False
+        normalized: list[dict[str, Any]] = []
+
+        for clip in clips:
+            item = dict(clip)
+            source_duration = self._clip_source_duration(item)
+            output_duration = self._clip_output_duration(item)
+
+            if output_duration <= 0:
+                if str(item.get("kind") or "") == "rough":
+                    role = str(item.get("timeline_role") or "")
+                    is_hook = role == "hook" or bool(item.get("is_hook"))
+                    planned = hook_duration if is_hook else scene_duration
+                    if target_remaining > 0:
+                        planned = min(planned, target_remaining)
+                    output_duration = max(0.1, planned)
+                else:
+                    output_duration = max(0.1, source_duration)
+
+            if str(item.get("kind") or "") == "rough":
+                seen_rough = True
+                if target_remaining > 0:
+                    target_remaining = max(0.0, target_remaining - output_duration)
+
+            item["output_duration"] = round(max(0.1, output_duration), 3)
+            normalized.append(item)
+
+        return normalized
+
+    def _timeline_total_duration(self, clips: list[dict[str, Any]]) -> float:
+        total = 0.0
+        for clip in clips:
+            output_duration = self._clip_output_duration(clip)
+            if output_duration <= 0:
+                output_duration = self._clip_source_duration(clip)
+            total += max(0.0, output_duration)
+        return total
+
+    def _refresh_timeline_total_label(self) -> None:
+        if not getattr(self, "timeline_total_label", None):
+            return
+        clips = self._timeline_with_output_durations(self.timeline_table.timeline_clips())
+        total_duration = self._timeline_total_duration(clips)
+        self.timeline_total_label.setText(
+            f"Timeline total: {format_duration(total_duration)} ({len(clips)} clips)"
+        )
+
+    def _clip_source_duration(self, clip: dict[str, Any]) -> float:
+        try:
+            item = ClipItem.from_dict(clip)
+            return max(0.0, item.end - item.start)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _clip_output_duration(self, clip: dict[str, Any]) -> float:
+        for key in ("output_duration", "output_duration_seconds"):
+            try:
+                value = float(clip.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+        return 0.0
+
+    def _export_settings_dict(self) -> dict[str, Any]:
+        return {
+            "resolution": self.export_resolution_combo.currentText(),
+            "fps": float(self.export_fps_spin.value()),
+            "bitrate": self.export_bitrate_input.text().strip(),
+            "output_path": self.export_output_input.text().strip(),
+        }
+
+    def _apply_export_settings(self, settings: dict[str, Any]) -> None:
+        settings = settings or {}
+        resolution = str(settings.get("resolution") or "1280x720")
+        index = self.export_resolution_combo.findText(resolution)
+        self.export_resolution_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.export_fps_spin.setValue(float(settings.get("fps", 30.0) or 0.0))
+        self.export_bitrate_input.setText(str(settings.get("bitrate", "4500k")))
+        self.export_output_input.setText(str(settings.get("output_path", "")))
+
+    def _with_clip_thumbnail(self, item: dict[str, Any]) -> dict[str, Any]:
+        data = dict(item)
+        if not self.project or not self.project.video_path:
+            return data
+        try:
+            start = ClipItem.from_dict(data).start
+        except (TypeError, ValueError):
+            return data
+        clip_id = str(data.get("id") or f"clip_{uuid.uuid4().hex[:6]}")
+        thumb_dir = Path(self.project.project_dir) / "thumbnails"
+        thumb_path = thumb_dir / f"{self._safe_project_filename(clip_id)}.jpg"
+        try:
+            extract_clip_thumbnail(self.project.video_path, thumb_path, start)
+            data["thumbnail_path"] = str(thumb_path)
+        except Exception as exc:
+            self._log(f"Thumbnail skipped for {clip_id}: {exc}")
+        return data
+
+    def _capture_editor_state(self) -> dict[str, Any]:
+        manual_clips = self.cut_table.to_cut_items() if getattr(self, "cut_table", None) else []
+        timeline_clips = (
+            self.timeline_table.timeline_clips() if getattr(self, "timeline_table", None) else []
+        )
+        return {
+            "manual_clips": [dict(item) for item in manual_clips],
+            "timeline_clips": [dict(item) for item in timeline_clips],
+        }
+
+    def _apply_editor_state(self, state: dict[str, Any]) -> None:
+        self._restoring_editor_history = True
+        try:
+            self.cut_table.set_cut_items(list(state.get("manual_clips") or []))
+            self.timeline_table.set_timeline_clips(list(state.get("timeline_clips") or []))
+            self._refresh_timeline_total_label()
+        finally:
+            self._restoring_editor_history = False
+
+    def _reset_editor_history(self) -> None:
+        self._editor_undo_stack = [self._capture_editor_state()]
+        self._editor_redo_stack = []
+
+    def _push_editor_history(self) -> None:
+        if self._restoring_editor_history:
+            return
+        state = self._capture_editor_state()
+        if self._editor_undo_stack and self._editor_undo_stack[-1] == state:
+            return
+        self._editor_undo_stack.append(state)
+        self._editor_undo_stack = self._editor_undo_stack[-80:]
+        self._editor_redo_stack.clear()
+
+    def _on_editor_timeline_changed(self) -> None:
+        self._refresh_timeline_total_label()
+        self._push_editor_history()
+        if self.project:
+            self.save_project()
+
+    def _on_editor_manual_changed(self, _item: QTableWidgetItem) -> None:
+        self._push_editor_history()
+        if self.project:
+            self.save_project()
+
+    def undo_editor_change(self) -> None:
+        if len(self._editor_undo_stack) < 2:
+            self.statusBar().showMessage("Nothing to undo", 2500)
+            return
+        current = self._editor_undo_stack.pop()
+        self._editor_redo_stack.append(current)
+        self._apply_editor_state(self._editor_undo_stack[-1])
+        self.save_project()
+        self.statusBar().showMessage("Undo", 2500)
+
+    def redo_editor_change(self) -> None:
+        if not self._editor_redo_stack:
+            self.statusBar().showMessage("Nothing to redo", 2500)
+            return
+        state = self._editor_redo_stack.pop()
+        self._editor_undo_stack.append(state)
+        self._apply_editor_state(state)
+        self.save_project()
+        self.statusBar().showMessage("Redo", 2500)
 
     def suggest_conflict_hook(self) -> None:
         if not self._require_project():
@@ -1638,11 +2233,27 @@ class MainWindow(QMainWindow):
         if not getattr(self, "rough_range_label", None):
             return
         if end <= start:
-            self.rough_range_label.setText("Import a video to choose the rough cut source range.")
+            self.rough_range_label.setText("Import Video Ori to choose the rough cut range.")
             return
         self.rough_range_label.setText(
-            f"Selected source: {format_duration(start)} - {format_duration(end)}"
+            f"Selected Video Ori: {format_duration(start)} - {format_duration(end)}"
         )
+        self._sync_rough_target_from_percent()
+
+    def _sync_rough_target_from_percent(self, *_: Any) -> None:
+        if not getattr(self, "rough_target_percent_spin", None):
+            return
+        base_seconds = self._rough_target_base_seconds()
+        target_seconds = base_seconds * (self.rough_target_percent_spin.value() / 100.0)
+        self.rough_target_final_minutes_spin.setValue(round(target_seconds / 60.0, 1))
+
+    def _rough_target_base_seconds(self) -> float:
+        start, end = self._rough_source_range()
+        if end > start:
+            return end - start
+        if self.project and self.project.metadata:
+            return VideoMetadata.from_dict(self.project.metadata).duration
+        return 0.0
 
     def _refresh_rough_range_selector(self, duration_seconds: float | None = None) -> None:
         if not getattr(self, "rough_range_selector", None):
@@ -2063,6 +2674,7 @@ class MainWindow(QMainWindow):
             "max_clips": self.rough_max_clips_spin.value(),
             "scene_output_seconds": self.rough_scene_output_seconds_spin.value(),
             "target_final_minutes": float(self.rough_target_final_minutes_spin.value()),
+            "target_percent": float(self.rough_target_percent_spin.value()),
             "slow_every_n_clips": self.rough_slow_every_spin.value(),
             "slow_factor": self.rough_slow_factor_spin.value(),
             "hook_seconds": self.rough_hook_seconds_spin.value(),
@@ -2085,7 +2697,19 @@ class MainWindow(QMainWindow):
         self.rough_sample_every_spin.setValue(int(settings.get("sample_every_seconds", 30)))
         self.rough_max_clips_spin.setValue(int(settings.get("max_clips", 60)))
         self.rough_scene_output_seconds_spin.setValue(int(settings.get("scene_output_seconds", 12)))
-        self.rough_target_final_minutes_spin.setValue(float(settings.get("target_final_minutes", 12.0)))
+        source_start = float(settings.get("source_start_seconds", 0.0) or 0.0)
+        source_end = float(settings.get("source_end_seconds", 0.0) or 0.0)
+        if getattr(self, "rough_range_selector", None) and source_end > 0:
+            self.rough_range_selector.set_range(source_start, source_end)
+        if "target_percent" in settings:
+            target_percent = float(settings.get("target_percent", 12.0))
+        else:
+            base_seconds = self._rough_target_base_seconds()
+            target_minutes = float(settings.get("target_final_minutes", 12.0))
+            target_percent = (target_minutes * 60 / base_seconds * 100) if base_seconds > 0 else 12.0
+        target_percent = max(0.0, min(100.0, target_percent))
+        self.rough_target_percent_spin.setValue(target_percent)
+        self._sync_rough_target_from_percent()
         self.rough_slow_every_spin.setValue(int(settings.get("slow_every_n_clips", 0)))
         self.rough_slow_factor_spin.setValue(float(settings.get("slow_factor", 1.2)))
         self.rough_hook_seconds_spin.setValue(int(settings.get("hook_seconds", 5)))
@@ -2100,13 +2724,6 @@ class MainWindow(QMainWindow):
         self.rough_color_grade_combo.setCurrentIndex(color_index if color_index >= 0 else 0)
         self.rough_music_path_input.setText(str(settings.get("background_audio_path", "")))
         self.rough_music_volume_spin.setValue(float(settings.get("background_audio_volume", 0.22)))
-        if getattr(self, "rough_range_selector", None):
-            source_end = float(settings.get("source_end_seconds", 0.0) or 0.0)
-            if source_end > 0:
-                self.rough_range_selector.set_range(
-                    float(settings.get("source_start_seconds", 0.0) or 0.0),
-                    source_end,
-                )
 
     def save_script_text(self) -> None:
         if not self._require_project():
@@ -2156,6 +2773,8 @@ class MainWindow(QMainWindow):
         Path(data.project_dir, "clips").mkdir(exist_ok=True)
         Path(data.project_dir, "scene_frames").mkdir(exist_ok=True)
         Path(data.project_dir, "rough_cuts").mkdir(exist_ok=True)
+        Path(data.project_dir, "exports").mkdir(exist_ok=True)
+        Path(data.project_dir, "thumbnails").mkdir(exist_ok=True)
         self.database = TranscriptDatabase(data.database_path)
 
         metadata = VideoMetadata.from_dict(data.metadata) if data.metadata else None
@@ -2163,11 +2782,15 @@ class MainWindow(QMainWindow):
         self._refresh_visual_editor_video(metadata.duration if metadata else None)
         self._refresh_rough_range_selector(metadata.duration if metadata else None)
         self.scene_table.set_scene_notes(data.scene_notes)
-        self.cut_table.set_cut_items(data.cut_list)
+        self.cut_table.set_cut_items(data.manual_clips or data.cut_list)
+        self.timeline_table.set_timeline_clips(data.timeline_clips)
+        self._refresh_timeline_total_label()
         self.checklist_widget.set_states(data.checklist)
         self.script_edit.setPlainText(data.script_text)
         self.rough_hook_edit.setPlainText(data.rough_hook_text)
         self._apply_rough_cut_settings(data.rough_cut_settings)
+        self._apply_export_settings(data.export_settings)
+        self._refresh_timeline_total_label()
         self._set_rough_cut_parts(data.rough_cut_parts)
         style_index = self.script_style_combo.findData(data.script_style)
         self.script_style_combo.setCurrentIndex(style_index if style_index >= 0 else 0)
@@ -2176,12 +2799,16 @@ class MainWindow(QMainWindow):
         self.log_panel.set_messages(data.export_logs)
         self._refresh_transcript_table()
         self._set_project_label()
+        self._reset_editor_history()
         self.statusBar().showMessage("Project loaded", 4000)
 
     def _sync_project_from_ui(self) -> None:
         if not self.project:
             return
-        self.project.cut_list = self.cut_table.to_cut_items()
+        manual_clips = self.cut_table.to_cut_items()
+        self.project.cut_list = manual_clips
+        self.project.manual_clips = manual_clips
+        self.project.timeline_clips = self.timeline_table.timeline_clips()
         self.project.checklist = self.checklist_widget.states()
         self.project.scene_notes = self.scene_table.to_scene_notes()
         self.project.script_text = self.script_edit.toPlainText()
@@ -2190,6 +2817,7 @@ class MainWindow(QMainWindow):
         self.project.rough_hook_text = self.rough_hook_edit.toPlainText()
         self.project.rough_cut_settings = self._rough_cut_settings_dict()
         self.project.rough_cut_parts = [dict(part) for part in self.rough_cut_parts]
+        self.project.export_settings = self._export_settings_dict()
 
     def _refresh_transcript_table(self) -> None:
         if not self.database:
@@ -2200,10 +2828,17 @@ class MainWindow(QMainWindow):
     def _set_project_label(self) -> None:
         if not self.project:
             self.project_label.setText("No project loaded")
+            if getattr(self, "project_status_label", None):
+                self.project_status_label.setText("No project loaded")
+            self.setWindowTitle("StoryCut AI")
             return
 
-        video = self.project.video_path if self.project.video_path else "No video imported"
-        self.project_label.setText(f"{self.project.name} | {video}")
+        video = self.project.video_path if self.project.video_path else "No Video Ori imported"
+        text = f"{self.project.name} | {video}"
+        self.project_label.setText(text)
+        if getattr(self, "project_status_label", None):
+            self.project_status_label.setText(text)
+        self.setWindowTitle(f"StoryCut AI - {self.project.name}")
 
     def _require_project(self) -> bool:
         if not self.project:

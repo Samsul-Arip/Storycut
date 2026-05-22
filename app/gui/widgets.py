@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QSize, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QMimeData, QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -32,13 +33,16 @@ from PyQt6.QtWidgets import (
 from app.core.video_utils import format_duration, parse_timestamp
 
 
+CLIP_MIME_TYPE = "application/x-storycut-clip"
+
+
 DEFAULT_CHECKLIST_ITEMS = [
     "I am adding original commentary, criticism, analysis, or explanation.",
     "I am using only the clips needed to support the review or storytelling point.",
-    "No source video clip is longer than five seconds.",
+    "No Video Ori clip is longer than five seconds.",
     "I am not presenting long uninterrupted portions as a substitute for the original work.",
     "I replaced copied subtitles/dialogue with my own narration or paraphrased script.",
-    "I removed source audio unless a short excerpt is necessary for commentary.",
+    "I removed Video Ori audio unless a short excerpt is necessary for commentary.",
     "Any background music I add is royalty-free or properly licensed.",
     "The final edit focuses on the core conflict, climax, resolution, and my own viewpoint.",
     "My narration changes the context by explaining meaning, themes, craft, or character choices.",
@@ -156,6 +160,354 @@ class CutListTable(QTableWidget):
         for row in rows:
             self.removeRow(row)
         return len(rows)
+
+
+class ManualClipTable(QTableWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setColumnCount(4)
+        self.setHorizontalHeaderLabels(["Clip", "Duration", "Video Ori Timestamp", "Note"])
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        self.setDragEnabled(True)
+        self.setAcceptDrops(False)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setVisible(False)
+        self.setIconSize(QSize(96, 54))
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+
+    def set_manual_clips(self, items: list[dict[str, Any]]) -> None:
+        self.blockSignals(True)
+        self.setRowCount(len(items))
+        for row, item in enumerate(items):
+            data = dict(item)
+            clip_id = str(data.get("id") or f"manual_{row + 1:03d}")
+            start = parse_timestamp(data.get("start", 0.0))
+            end = parse_timestamp(data.get("end", start))
+
+            clip_item = _readonly_item(clip_id)
+            clip_item.setData(Qt.ItemDataRole.UserRole, data)
+            thumbnail = _thumbnail_icon(data)
+            if thumbnail:
+                clip_item.setIcon(thumbnail)
+            self.setItem(row, 0, clip_item)
+            self.setItem(row, 1, _readonly_item(_duration_text(start, end)))
+            self.setItem(row, 2, _readonly_item(f"{format_duration(start)} - {format_duration(end)}"))
+            self.setItem(row, 3, QTableWidgetItem(str(data.get("text", ""))))
+        self.blockSignals(False)
+        self.resizeRowsToContents()
+
+    def manual_clips(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for row in range(self.rowCount()):
+            id_item = self.item(row, 0)
+            base = dict(id_item.data(Qt.ItemDataRole.UserRole) or {}) if id_item else {}
+            base["id"] = id_item.text().strip() if id_item else f"manual_{row + 1:03d}"
+            if self.item(row, 3):
+                base["text"] = self.item(row, 3).text().strip()
+            items.append(base)
+        return items
+
+    def selected_manual_clips(self) -> list[dict[str, Any]]:
+        all_items = self.manual_clips()
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        return [all_items[row] for row in rows if 0 <= row < len(all_items)]
+
+    def update_first_selected_range(self, start: float, end: float) -> dict[str, Any] | None:
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        if not rows:
+            return None
+        row = rows[0]
+        id_item = self.item(row, 0)
+        data = dict(id_item.data(Qt.ItemDataRole.UserRole) or {}) if id_item else {}
+        data["start"] = format_duration(start)
+        data["end"] = format_duration(end)
+        if id_item:
+            id_item.setData(Qt.ItemDataRole.UserRole, data)
+        self.item(row, 1).setText(_duration_text(start, end))
+        self.item(row, 2).setText(f"{format_duration(start)} - {format_duration(end)}")
+        return self.manual_clips()[row]
+
+    def remove_selected_rows(self) -> int:
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            self.removeRow(row)
+        return len(rows)
+
+    def set_cut_items(self, items: list[dict[str, Any]]) -> None:
+        self.set_manual_clips(items)
+
+    def to_cut_items(self) -> list[dict[str, Any]]:
+        return self.manual_clips()
+
+    def selected_cut_items(self) -> list[dict[str, Any]]:
+        return self.selected_manual_clips()
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        clips = self.selected_manual_clips()
+        if not clips:
+            return
+        mime = QMimeData()
+        mime.setData(
+            CLIP_MIME_TYPE,
+            json.dumps({"origin": "manual", "clips": clips}).encode("utf-8"),
+        )
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction)
+
+
+class TimelineClipTable(QTableWidget):
+    timelineChanged = pyqtSignal()
+    clipActivated = pyqtSignal(dict)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._zoom = 1.0
+        self.setColumnCount(7)
+        self.setHorizontalHeaderLabels(
+            ["#", "Clip", "Thumbnail", "Start", "End", "Duration", "Text"]
+        )
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setVisible(False)
+        self.setIconSize(QSize(112, 63))
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        self.itemSelectionChanged.connect(self._emit_selected_clip)
+        self.itemChanged.connect(self._on_item_changed)
+
+    def set_timeline_clips(self, items: list[dict[str, Any]]) -> None:
+        self.blockSignals(True)
+        self.setRowCount(len(items))
+        for row, item in enumerate(items):
+            data = dict(item)
+            clip_id = str(data.get("id") or data.get("timeline_id") or f"tl_{row + 1:03d}")
+            start = parse_timestamp(data.get("start", 0.0))
+            end = parse_timestamp(data.get("end", start))
+            output_duration = _clip_output_duration(data, start, end)
+
+            number_item = _readonly_item(str(row + 1))
+            clip_item = _readonly_item(clip_id)
+            clip_item.setData(Qt.ItemDataRole.UserRole, data)
+            thumb_item = _readonly_item("")
+            thumbnail = _thumbnail_icon(data)
+            if thumbnail:
+                thumb_item.setIcon(thumbnail)
+
+            self.setItem(row, 0, number_item)
+            self.setItem(row, 1, clip_item)
+            self.setItem(row, 2, thumb_item)
+            self.setItem(row, 3, QTableWidgetItem(format_duration(start)))
+            self.setItem(row, 4, QTableWidgetItem(format_duration(end)))
+            self.setItem(row, 5, _readonly_item(format_duration(output_duration)))
+            self.setItem(row, 6, QTableWidgetItem(str(data.get("text", ""))))
+            self.setRowHeight(row, int(62 * self._zoom))
+        self.blockSignals(False)
+        self.resizeColumnsToContents()
+        self.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+
+    def timeline_clips(self) -> list[dict[str, Any]]:
+        clips: list[dict[str, Any]] = []
+        for row in range(self.rowCount()):
+            clip_item = self.item(row, 1)
+            base = dict(clip_item.data(Qt.ItemDataRole.UserRole) or {}) if clip_item else {}
+            base["id"] = clip_item.text().strip() if clip_item else f"tl_{row + 1:03d}"
+            if self.item(row, 3):
+                base["start"] = self.item(row, 3).text().strip()
+            if self.item(row, 4):
+                base["end"] = self.item(row, 4).text().strip()
+            if self.item(row, 6):
+                base["text"] = self.item(row, 6).text().strip()
+            clips.append(base)
+        return clips
+
+    def selected_timeline_clip(self) -> dict[str, Any] | None:
+        row = self.currentRow()
+        clips = self.timeline_clips()
+        if row < 0 or row >= len(clips):
+            return None
+        return clips[row]
+
+    def remove_selected_rows(self) -> int:
+        clips = self.timeline_clips()
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()}, reverse=True)
+        for row in rows:
+            if 0 <= row < len(clips):
+                clips.pop(row)
+        if not rows:
+            return 0
+        self.set_timeline_clips(clips)
+        self.timelineChanged.emit()
+        return len(rows)
+
+    def split_selected_clip(self) -> bool:
+        row = self.currentRow()
+        clips = self.timeline_clips()
+        if row < 0 or row >= len(clips):
+            return False
+        clip = dict(clips[row])
+        start = parse_timestamp(clip.get("start", 0.0))
+        end = parse_timestamp(clip.get("end", 0.0))
+        if end - start < 0.2:
+            return False
+        middle = start + ((end - start) / 2)
+        output_duration = _clip_output_duration(clip, start, end)
+        first = dict(clip)
+        second = dict(clip)
+        first["id"] = f"{clip.get('id', 'clip')}_A"
+        first["end"] = format_duration(middle)
+        first["text"] = f"{clip.get('text', '')} (part A)".strip()
+        first["output_duration"] = round(output_duration / 2, 3)
+        second["id"] = f"{clip.get('id', 'clip')}_B"
+        second["start"] = format_duration(middle)
+        second["text"] = f"{clip.get('text', '')} (part B)".strip()
+        second["output_duration"] = round(output_duration / 2, 3)
+        clips[row : row + 1] = [first, second]
+        self.set_timeline_clips(clips)
+        self.selectRow(row)
+        self.timelineChanged.emit()
+        return True
+
+    def update_selected_range(self, start: float, end: float) -> dict[str, Any] | None:
+        row = self.currentRow()
+        clips = self.timeline_clips()
+        if row < 0 or row >= len(clips):
+            return None
+        clips[row]["start"] = format_duration(start)
+        clips[row]["end"] = format_duration(end)
+        if clips[row].get("kind") != "rough":
+            clips[row]["output_duration"] = round(max(0.1, end - start), 3)
+        self.set_timeline_clips(clips)
+        self.selectRow(row)
+        self.timelineChanged.emit()
+        return clips[row]
+
+    def append_clips(self, clips_to_add: list[dict[str, Any]]) -> None:
+        clips = self.timeline_clips()
+        for index, clip in enumerate(clips_to_add, start=1):
+            clips.append(_timeline_copy(clip, index))
+        self.set_timeline_clips(clips)
+        if clips:
+            self.selectRow(len(clips) - 1)
+        self.timelineChanged.emit()
+
+    def set_zoom(self, zoom: float) -> None:
+        self._zoom = min(max(0.7, zoom), 2.2)
+        self.setIconSize(QSize(int(112 * self._zoom), int(63 * self._zoom)))
+        for row in range(self.rowCount()):
+            self.setRowHeight(row, int(62 * self._zoom))
+
+    def zoom(self) -> float:
+        return self._zoom
+
+    def startDrag(self, supported_actions: Qt.DropAction) -> None:
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        clips = self.timeline_clips()
+        selected = [clips[row] for row in rows if 0 <= row < len(clips)]
+        if not selected:
+            return
+        mime = QMimeData()
+        mime.setData(
+            CLIP_MIME_TYPE,
+            json.dumps({"origin": "timeline", "rows": rows, "clips": selected}).encode("utf-8"),
+        )
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(CLIP_MIME_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if event.mimeData().hasFormat(CLIP_MIME_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event: Any) -> None:
+        if not event.mimeData().hasFormat(CLIP_MIME_TYPE):
+            super().dropEvent(event)
+            return
+        payload = _decode_clip_payload(event.mimeData().data(CLIP_MIME_TYPE))
+        if not payload:
+            return
+
+        target_row = self._drop_row(event)
+        clips = self.timeline_clips()
+        incoming = [dict(clip) for clip in payload.get("clips", [])]
+        if payload.get("origin") == "timeline":
+            rows = sorted(int(row) for row in payload.get("rows", []) if 0 <= int(row) < len(clips))
+            moving = [clips[row] for row in rows]
+            for row in reversed(rows):
+                clips.pop(row)
+            target_row -= sum(1 for row in rows if row < target_row)
+            incoming = moving
+        else:
+            incoming = [_timeline_copy(clip, index) for index, clip in enumerate(incoming, start=1)]
+
+        target_row = min(max(0, target_row), len(clips))
+        for offset, clip in enumerate(incoming):
+            clips.insert(target_row + offset, clip)
+        self.set_timeline_clips(clips)
+        if incoming:
+            self.selectRow(target_row)
+        self.timelineChanged.emit()
+        event.acceptProposedAction()
+
+    def _drop_row(self, event: Any) -> int:
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+        return index.row() if index.isValid() else self.rowCount()
+
+    def _emit_selected_clip(self) -> None:
+        clip = self.selected_timeline_clip()
+        if clip:
+            self.clipActivated.emit(clip)
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() in (3, 4):
+            try:
+                start = parse_timestamp(self.item(item.row(), 3).text())
+                end = parse_timestamp(self.item(item.row(), 4).text())
+                clip_item = self.item(item.row(), 1)
+                data = dict(clip_item.data(Qt.ItemDataRole.UserRole) or {}) if clip_item else {}
+                if data.get("kind") != "rough":
+                    data["output_duration"] = round(max(0.1, end - start), 3)
+                    if clip_item:
+                        clip_item.setData(Qt.ItemDataRole.UserRole, data)
+                output_duration = _clip_output_duration(data, start, end)
+                self.blockSignals(True)
+                self.item(item.row(), 5).setText(format_duration(output_duration))
+                self.blockSignals(False)
+            except (AttributeError, TypeError, ValueError):
+                self.blockSignals(False)
+        self.timelineChanged.emit()
 
 
 class RangeTimeline(QWidget):
@@ -705,6 +1057,157 @@ class VideoCutEditorWidget(QWidget):
     def _range_seconds(self) -> tuple[float, float]:
         return float(self.in_spin.value()), float(self.out_spin.value())
 
+    def current_position_seconds(self) -> float:
+        return max(0.0, self._position_ms / 1000)
+
+
+class VideoPreviewPanel(QWidget):
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._video_path = ""
+        self._duration_ms = 0
+        self._position_ms = 0
+        self._clip_start_ms = 0
+        self._clip_end_ms = 0
+        self._range_preview = False
+
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_output.setVolume(0.65)
+        self.player.setAudioOutput(self.audio_output)
+
+        self.video_widget = QVideoWidget()
+        self.video_widget.setObjectName("VideoPreview")
+        self.video_widget.setMinimumSize(360, 220)
+        self.player.setVideoOutput(self.video_widget)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("PanelTitle")
+        self.status_label = QLabel("No preview loaded")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.play_button = QToolButton()
+        self.back_button = QToolButton()
+        self.forward_button = QToolButton()
+        style = self.style()
+        self.play_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.back_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekBackward))
+        self.forward_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
+        for button in (self.play_button, self.back_button, self.forward_button):
+            button.setObjectName("TransportButton")
+            button.setIconSize(QSize(18, 18))
+            button.setFixedSize(36, 34)
+
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setRange(0, 0)
+        self.time_label = QLabel("00:00.000 / 00:00.000")
+        self.time_label.setMinimumWidth(170)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        header = QHBoxLayout()
+        header.addWidget(self.title_label)
+        header.addWidget(self.status_label, 1)
+        transport = QHBoxLayout()
+        transport.addWidget(self.back_button)
+        transport.addWidget(self.play_button)
+        transport.addWidget(self.forward_button)
+        transport.addWidget(self.position_slider, 1)
+        transport.addWidget(self.time_label)
+        layout.addLayout(header)
+        layout.addWidget(self.video_widget, 1)
+        layout.addLayout(transport)
+
+        self.play_button.clicked.connect(self._toggle_playback)
+        self.back_button.clicked.connect(lambda: self.seek_to_ms(self._position_ms - 1000))
+        self.forward_button.clicked.connect(lambda: self.seek_to_ms(self._position_ms + 1000))
+        self.position_slider.sliderMoved.connect(self.seek_to_ms)
+        self.player.positionChanged.connect(self._on_position_changed)
+        self.player.durationChanged.connect(self._on_duration_changed)
+        self.player.playbackStateChanged.connect(self._sync_play_button)
+        self.player.errorOccurred.connect(self._on_playback_error)
+        self.set_video("", 0.0)
+
+    def set_video(self, video_path: str, duration_seconds: float | None = None) -> None:
+        self._video_path = video_path
+        self._range_preview = False
+        self.player.stop()
+        self._clip_start_ms = 0
+        self._clip_end_ms = 0
+        if not video_path:
+            self.player.setSource(QUrl())
+            self.status_label.setText("No preview loaded")
+            self._set_duration_ms(0)
+            self._set_enabled(False)
+            return
+
+        source = Path(video_path)
+        self.player.setSource(QUrl.fromLocalFile(str(source)))
+        self.status_label.setText(source.name)
+        self._set_enabled(True)
+        self._set_duration_ms(int(round(max(0.0, float(duration_seconds or 0.0)) * 1000)))
+
+    def set_clip_range(self, start: float, end: float, seek: bool = True) -> None:
+        self._clip_start_ms = round(max(0.0, start) * 1000)
+        self._clip_end_ms = round(max(start, end) * 1000)
+        self._range_preview = self._clip_end_ms > self._clip_start_ms
+        if seek:
+            self.seek_to_ms(self._clip_start_ms)
+
+    def seek_to_ms(self, position_ms: int) -> None:
+        if self._duration_ms <= 0:
+            return
+        position_ms = max(0, min(int(position_ms), self._duration_ms))
+        self.player.setPosition(position_ms)
+        self._on_position_changed(position_ms)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for widget in (self.play_button, self.back_button, self.forward_button, self.position_slider):
+            widget.setEnabled(enabled)
+
+    def _set_duration_ms(self, duration_ms: int) -> None:
+        self._duration_ms = max(0, int(duration_ms))
+        self.position_slider.setRange(0, self._duration_ms)
+        self._on_position_changed(min(self._position_ms, self._duration_ms))
+
+    def _on_position_changed(self, position_ms: int) -> None:
+        self._position_ms = max(0, min(int(position_ms), max(0, self._duration_ms)))
+        self.position_slider.blockSignals(True)
+        self.position_slider.setValue(self._position_ms)
+        self.position_slider.blockSignals(False)
+        self.time_label.setText(
+            f"{format_duration(self._position_ms / 1000)} / {format_duration(self._duration_ms / 1000)}"
+        )
+        if self._range_preview and self._clip_end_ms > 0 and self._position_ms >= self._clip_end_ms:
+            self.player.pause()
+            self.seek_to_ms(self._clip_start_ms)
+
+    def _on_duration_changed(self, duration_ms: int) -> None:
+        if duration_ms > 0:
+            self._set_duration_ms(duration_ms)
+
+    def _on_playback_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if error != QMediaPlayer.Error.NoError:
+            self.status_label.setText(error_string or "Preview tidak bisa diputar di sistem ini")
+
+    def _sync_play_button(self, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        else:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        self.play_button.setIcon(icon)
+
+    def _toggle_playback(self) -> None:
+        if not self._video_path:
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            if self._range_preview and self._position_ms >= self._clip_end_ms:
+                self.seek_to_ms(self._clip_start_ms)
+            self.player.play()
+
 
 class SceneNotesTable(QTableWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -823,6 +1326,54 @@ def _thumbnail_pixmap(image_path: str) -> QPixmap | None:
         Qt.AspectRatioMode.KeepAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+
+
+def _thumbnail_icon(data: dict[str, Any]) -> QIcon | None:
+    image_path = str(data.get("thumbnail_path") or data.get("thumbnail") or "").strip()
+    if not image_path:
+        return None
+    pixmap = _thumbnail_pixmap(image_path)
+    return QIcon(pixmap) if pixmap else None
+
+
+def _duration_text(start: float, end: float) -> str:
+    return format_duration(max(0.0, end - start))
+
+
+def _clip_output_duration(data: dict[str, Any], start: float, end: float) -> float:
+    for key in ("output_duration", "output_duration_seconds"):
+        try:
+            value = float(data.get(key, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0:
+            return value
+    return max(0.0, end - start)
+
+
+def _decode_clip_payload(raw: Any) -> dict[str, Any]:
+    try:
+        if hasattr(raw, "data"):
+            raw = raw.data()
+        payload = json.loads(bytes(raw).decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _timeline_copy(clip: dict[str, Any], index: int = 1) -> dict[str, Any]:
+    data = dict(clip)
+    base_id = str(data.get("id") or "clip")
+    data["id"] = f"{base_id}_tl_{datetime.now().strftime('%H%M%S%f')}_{index}"
+    data["source_clip_id"] = base_id
+    data["kind"] = str(data.get("kind") or "manual")
+    try:
+        start = parse_timestamp(data.get("start", 0.0))
+        end = parse_timestamp(data.get("end", start))
+        data.setdefault("output_duration", round(max(0.1, end - start), 3))
+    except (TypeError, ValueError):
+        pass
+    return data
 
 
 def _to_dict(record: Any) -> dict[str, Any]:

@@ -23,6 +23,8 @@ class ProjectData:
     audio_path: str = ""
     metadata: dict[str, Any] | None = None
     cut_list: list[dict[str, Any]] = field(default_factory=list)
+    manual_clips: list[dict[str, Any]] = field(default_factory=list)
+    timeline_clips: list[dict[str, Any]] = field(default_factory=list)
     checklist: list[dict[str, Any]] = field(default_factory=list)
     scene_notes: list[dict[str, Any]] = field(default_factory=list)
     script_text: str = ""
@@ -31,6 +33,7 @@ class ProjectData:
     rough_hook_text: str = ""
     rough_cut_settings: dict[str, Any] = field(default_factory=dict)
     rough_cut_parts: list[dict[str, Any]] = field(default_factory=list)
+    export_settings: dict[str, Any] = field(default_factory=dict)
     export_logs: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
@@ -86,6 +89,7 @@ class ProjectManager:
         project_dir = Path(payload.get("project_dir") or path.parent)
         database_path = Path(payload.get("database_path") or project_dir / "transcript.sqlite3")
 
+        manual_clips = list(payload.get("manual_clips") or payload.get("cut_list") or [])
         return ProjectData(
             name=str(payload.get("name") or path.stem),
             project_dir=str(project_dir),
@@ -94,7 +98,9 @@ class ProjectManager:
             video_path=str(payload.get("video_path") or ""),
             audio_path=str(payload.get("audio_path") or ""),
             metadata=payload.get("metadata"),
-            cut_list=list(payload.get("cut_list") or []),
+            cut_list=list(payload.get("cut_list") or manual_clips),
+            manual_clips=manual_clips,
+            timeline_clips=list(payload.get("timeline_clips") or []),
             checklist=list(payload.get("checklist") or []),
             scene_notes=list(payload.get("scene_notes") or []),
             script_text=str(payload.get("script_text") or ""),
@@ -103,6 +109,7 @@ class ProjectManager:
             rough_hook_text=str(payload.get("rough_hook_text") or ""),
             rough_cut_settings=dict(payload.get("rough_cut_settings") or {}),
             rough_cut_parts=list(payload.get("rough_cut_parts") or []),
+            export_settings=dict(payload.get("export_settings") or {}),
             export_logs=list(payload.get("export_logs") or []),
             created_at=str(payload.get("created_at") or datetime.now().isoformat(timespec="seconds")),
             updated_at=str(payload.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
@@ -131,6 +138,7 @@ def _ensure_project_dirs(project_dir: Path) -> None:
     (project_dir / "clips").mkdir(exist_ok=True)
     (project_dir / "scene_frames").mkdir(exist_ok=True)
     (project_dir / "rough_cuts").mkdir(exist_ok=True)
+    (project_dir / "thumbnails").mkdir(exist_ok=True)
 
 
 def _with_project_extension(path: Path) -> Path:
