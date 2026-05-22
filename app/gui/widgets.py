@@ -260,6 +260,155 @@ class RangeTimeline(QWidget):
         return max(0, min(int(value_ms), self._duration_ms))
 
 
+class RoughCutRangeSelector(QWidget):
+    rangeChanged = pyqtSignal(float, float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._duration = 0.0
+        self._start = 0.0
+        self._end = 0.0
+        self._drag_mode = ""
+        self._drag_offset = 0.0
+        self.setMinimumHeight(92)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def selected_range(self) -> tuple[float, float]:
+        return self._start, self._end
+
+    def duration_seconds(self) -> float:
+        return self._duration
+
+    def set_duration(self, duration_seconds: float) -> None:
+        previous_duration = self._duration
+        self._duration = max(0.0, float(duration_seconds or 0.0))
+        if self._duration <= 0:
+            self._start = 0.0
+            self._end = 0.0
+        elif previous_duration <= 0 or self._end <= 0:
+            self._start = 0.0
+            self._end = self._duration
+        else:
+            self._start = min(max(0.0, self._start), self._duration)
+            self._end = min(max(self._start + self._minimum_gap(), self._end), self._duration)
+        self.update()
+        self.rangeChanged.emit(self._start, self._end)
+
+    def set_range(self, start_seconds: float, end_seconds: float) -> None:
+        if self._duration <= 0:
+            self._start = 0.0
+            self._end = 0.0
+        else:
+            start = min(max(0.0, float(start_seconds or 0.0)), self._duration)
+            end = min(max(start + self._minimum_gap(), float(end_seconds or 0.0)), self._duration)
+            if end <= start:
+                end = min(self._duration, start + self._minimum_gap())
+                start = max(0.0, end - self._minimum_gap())
+            self._start = start
+            self._end = end
+        self.update()
+        self.rangeChanged.emit(self._start, self._end)
+
+    def mousePressEvent(self, event: Any) -> None:
+        if self._duration <= 0 or event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        seconds = self._seconds_from_x(int(event.position().x()))
+        start_x = self._x_for_seconds(self._start)
+        end_x = self._x_for_seconds(self._end)
+        x = int(event.position().x())
+
+        if abs(x - start_x) <= 12:
+            self._drag_mode = "start"
+        elif abs(x - end_x) <= 12:
+            self._drag_mode = "end"
+        elif self._start <= seconds <= self._end:
+            self._drag_mode = "move"
+            self._drag_offset = seconds - self._start
+        else:
+            self._drag_mode = "start" if seconds < self._start else "end"
+            self._set_drag_position(seconds)
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        if not self._drag_mode:
+            return
+        self._set_drag_position(self._seconds_from_x(int(event.position().x())))
+
+    def mouseReleaseEvent(self, event: Any) -> None:
+        self._drag_mode = ""
+        self._drag_offset = 0.0
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track = self._track_rect()
+        radius = 8
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#2f3b4e"))
+        painter.drawRoundedRect(track, radius, radius)
+
+        if self._duration <= 0:
+            painter.setPen(QColor("#94a3b8"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Import video untuk memilih range rough cut")
+            return
+
+        start_x = self._x_for_seconds(self._start)
+        end_x = self._x_for_seconds(self._end)
+        selection = track.adjusted(start_x - track.left(), -3, -(track.right() - end_x), 3)
+        painter.setBrush(QColor("#2563eb"))
+        painter.drawRoundedRect(selection, radius, radius)
+
+        painter.setBrush(QColor("#f8fafc"))
+        for handle_x in (start_x, end_x):
+            painter.drawRoundedRect(handle_x - 4, track.top() - 9, 8, track.height() + 18, 4, 4)
+
+        painter.setPen(QColor("#cbd5e1"))
+        painter.drawText(12, 22, "Source range")
+        painter.drawText(
+            self.width() - 280,
+            22,
+            f"{format_duration(self._start)} - {format_duration(self._end)}",
+        )
+        painter.drawText(track.left(), self.height() - 8, format_duration(self._start))
+        end_text = format_duration(self._end)
+        painter.drawText(track.right() - 90, self.height() - 8, end_text)
+
+    def _set_drag_position(self, seconds: float) -> None:
+        seconds = min(max(0.0, seconds), self._duration)
+        gap = self._minimum_gap()
+        if self._drag_mode == "start":
+            self._start = min(seconds, self._end - gap)
+        elif self._drag_mode == "end":
+            self._end = max(seconds, self._start + gap)
+        elif self._drag_mode == "move":
+            length = max(gap, self._end - self._start)
+            new_start = min(max(0.0, seconds - self._drag_offset), max(0.0, self._duration - length))
+            self._start = new_start
+            self._end = min(self._duration, new_start + length)
+        self.update()
+        self.rangeChanged.emit(self._start, self._end)
+
+    def _seconds_from_x(self, x: int) -> float:
+        track = self._track_rect()
+        ratio = (x - track.left()) / max(1, track.width())
+        return min(max(0.0, ratio), 1.0) * self._duration
+
+    def _x_for_seconds(self, seconds: float) -> int:
+        track = self._track_rect()
+        ratio = min(max(0.0, seconds / max(0.001, self._duration)), 1.0)
+        return track.left() + round(track.width() * ratio)
+
+    def _track_rect(self) -> Any:
+        track = self.rect().adjusted(12, 38, -12, -28)
+        track.setHeight(16)
+        return track
+
+    def _minimum_gap(self) -> float:
+        return min(60.0, max(1.0, self._duration / 200)) if self._duration > 0 else 1.0
+
+
 class VideoCutEditorWidget(QWidget):
     addClipRequested = pyqtSignal(float, float, str)
     updateClipRequested = pyqtSignal(float, float)

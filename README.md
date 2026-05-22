@@ -24,6 +24,8 @@ The app does not include features for bypassing copyright detection, evading Con
 - Apply a visual timeline selection directly to an existing cut list row.
 - Export selected clips with FFmpeg.
 - Build one chronological random rough-cut video from short source clips.
+- Select a source video range for rough-cut export with a draggable range slider.
+- Export multiple rough-cut parts from different source ranges, then combine the finished parts into one MP4.
 - Keep rough-cut source clips at five seconds or shorter.
 - Use a short conflict video clip from the source as the rough-cut hook.
 - Fill each scene with nearby video snippets instead of repeating one clip when possible.
@@ -85,7 +87,7 @@ The script generator can output an Indonesian draft. The `Alur Cerita Film` mode
 
 For visual clip editing, use the `Visual Cut` tab. Import a video, scrub the preview timeline, click `Mark In` and `Mark Out`, then click `Add Cut` to place that range in the cut list. Selecting an existing cut row loads its range back into the visual editor, so you can adjust the start/end points and click `Apply to Selected`.
 
-For visual rough cuts, use the `Rough Cut` tab. It samples source clips at five seconds or shorter, keeps them in chronological order, puts a short conflict video clip at the start, fills each scene with nearby snippets so it has enough narration space, targets an approximate final duration, and exports one MP4. The rough-cut controls can add light zoom, alternating mirror, fade transitions, and color grading for review/storytelling rhythm. Source audio is muted by default; choose a royalty-free music file if you want a new background track. These tools are provided for original commentary, review, and education, not for hiding or disguising copyrighted footage.
+For visual rough cuts, use the `Rough Cut` tab. It samples source clips at five seconds or shorter, keeps them in chronological order, puts a short conflict video clip at the start, fills each scene with nearby snippets so it has enough narration space, targets an approximate final duration, and exports one MP4. Use `Source Range` to render only a portion of the source video first, for example minute 10 to minute 25. Export another range afterward, then use `Combine Parts` to merge the finished rough-cut parts. The rough-cut controls can add light zoom, alternating mirror, fade transitions, and color grading for review/storytelling rhythm. Source audio is muted by default; choose a royalty-free music file if you want a new background track. These tools are provided for original commentary, review, and education, not for hiding or disguising copyrighted footage.
 
 Set `Target final duration` above zero when you want a specific output length. In that mode, the app calculates how many scenes are needed from the target duration and trims the final export to that target. `Max clips` is only used when `Target final duration` is `0 min`.
 
@@ -173,8 +175,9 @@ Click `Refresh Project` or press `F5` to reload the currently opened `.storycut.
 4. Open `Visual Cut`, scrub the video preview, use `Mark In` / `Mark Out`, then click `Add Cut`.
 5. Select a cut row to load its range back into the visual editor, adjust it, then click `Apply to Selected`.
 6. Select cut list rows and click `Export Selected Clips`.
-7. Open `Rough Cut`, keep `Clip length` at `5 sec`, set `Target final duration` around `10-15 min`, keep the short conflict hook and nearby clips enabled, choose a royalty-free music file if needed, click `Suggest Conflict Hook`, then click `Export Rough Cut Video`.
-8. Open `Subtitle Indonesia` to generate Indonesian SRT subtitles from video audio when needed.
+7. Open `Rough Cut`, drag `Source Range` to choose the source section, keep `Clip length` at `5 sec`, set `Target final duration`, then click `Export Rough Cut Video`.
+8. Repeat with the next source range when needed, then click `Combine Parts` to merge the finished rough-cut outputs.
+9. Open `Subtitle Indonesia` to generate Indonesian SRT subtitles from video audio when needed.
 
 ## Timestamp Format
 

@@ -7,7 +7,7 @@ import shutil
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .video_utils import format_duration, read_video_metadata, resolve_media_tool, run_command
 
@@ -67,6 +67,8 @@ class RoughCutConfig:
     width: int = 1280
     height: int = 720
     seed: int | None = None
+    source_start_seconds: float = 0.0
+    source_end_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -104,21 +106,30 @@ def detect_conflict_hook_segment(
     transcript_records: list[Any],
     video_path: str | Path,
     hook_seconds: int = 8,
+    source_start_seconds: float = 0.0,
+    source_end_seconds: float = 0.0,
 ) -> RoughCutSegment | None:
     metadata = read_video_metadata(video_path)
     duration = max(0.0, metadata.duration)
     if duration <= 0:
         return None
 
-    hook_length = min(5.0, max(2.0, float(hook_seconds or 5)))
+    range_start, range_end = _source_range_bounds(duration, source_start_seconds, source_end_seconds)
+    range_duration = max(0.0, range_end - range_start)
+    if range_duration <= 0:
+        return None
+
+    hook_length = min(5.0, range_duration, max(2.0, float(hook_seconds or 5)))
     candidates: list[tuple[float, float]] = []
 
     for record in transcript_records:
         text = _record_text(record)
         if not text or not _has_conflict_marker(text):
             continue
-        start = max(0.0, _record_start(record) - 1.5)
-        end = min(duration, start + hook_length)
+        start = max(range_start, _record_start(record) - 1.5)
+        if start < range_start or start > range_end:
+            continue
+        end = min(range_end, start + hook_length)
         if end - start >= 1.0:
             score = _conflict_score(text)
             candidates.append((score, start))
@@ -126,10 +137,10 @@ def detect_conflict_hook_segment(
     if candidates:
         _, start = max(candidates, key=lambda item: (item[0], -item[1]))
     else:
-        start = 0.0
+        start = range_start
 
-    start = min(max(0.0, start), max(0.0, duration - hook_length))
-    return RoughCutSegment(index=0, start=start, end=min(duration, start + hook_length), slow_factor=1.0)
+    start = min(max(range_start, start), max(range_start, range_end - hook_length))
+    return RoughCutSegment(index=0, start=start, end=min(range_end, start + hook_length), slow_factor=1.0)
 
 
 def build_rough_cut_plan(
@@ -138,25 +149,31 @@ def build_rough_cut_plan(
 ) -> list[RoughCutSegment]:
     metadata = read_video_metadata(video_path)
     duration = max(0.0, metadata.duration)
+    source_start, source_end = _source_range_bounds(
+        duration,
+        config.source_start_seconds,
+        config.source_end_seconds,
+    )
+    source_duration = max(0.0, source_end - source_start)
     clip_seconds = min(5, max(1, int(config.clip_seconds)))
     sample_every = max(clip_seconds, int(config.sample_every_seconds))
     target_clip_count = _target_clip_count(config)
     max_clips = target_clip_count or max(1, int(config.max_clips))
 
-    if duration <= clip_seconds:
+    if source_duration <= clip_seconds:
         return [
             RoughCutSegment(
                 index=1,
-                start=0.0,
-                end=duration,
+                start=source_start,
+                end=source_end,
                 slow_factor=_slow_factor_for_index(1, config),
             )
         ]
 
-    last_start = max(0.0, duration - clip_seconds)
+    last_start = max(0.0, source_duration - clip_seconds)
     if target_clip_count:
         windows = _target_duration_windows(
-            duration=duration,
+            duration=source_duration,
             clip_seconds=clip_seconds,
             clip_count=target_clip_count,
         )
@@ -181,11 +198,12 @@ def build_rough_cut_plan(
     segments: list[RoughCutSegment] = []
     for index, (start_min, start_max) in enumerate(windows, start=1):
         if start_max <= start_min:
-            start = start_min
+            relative_start = start_min
         else:
-            start = rng.uniform(start_min, start_max)
-        start = min(max(0.0, start), last_start)
-        end = min(duration, start + clip_seconds)
+            relative_start = rng.uniform(start_min, start_max)
+        relative_start = min(max(0.0, relative_start), last_start)
+        start = source_start + relative_start
+        end = min(source_end, start + clip_seconds)
         segments.append(
             RoughCutSegment(
                 index=index,
@@ -196,6 +214,56 @@ def build_rough_cut_plan(
         )
 
     return sorted(segments, key=lambda segment: segment.start)
+
+
+def combine_rough_cut_parts(
+    part_paths: Iterable[str | Path],
+    output_path: str | Path,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    parts = [Path(path) for path in part_paths if str(path).strip()]
+    if len(parts) < 1:
+        raise ValueError("No rough cut parts were selected to combine.")
+
+    for part in parts:
+        if not part.exists():
+            raise FileNotFoundError(f"Rough cut part does not exist: {part}")
+
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if progress_callback:
+        progress_callback(f"Combining {len(parts)} rough cut part(s)...")
+
+    if len(parts) == 1:
+        shutil.copy2(parts[0], target)
+        return target
+
+    concat_file = target.parent / f"{target.stem}_parts_concat.txt"
+    concat_file.write_text("\n".join(_concat_line(path) for path in parts), encoding="utf-8")
+
+    ffmpeg = resolve_media_tool("ffmpeg")
+    run_command(
+        [
+            ffmpeg,
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_file),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(target),
+        ]
+    )
+
+    if progress_callback:
+        progress_callback(f"Combined rough cut exported: {target}")
+    return target
 
 
 def export_story_rough_cut(
@@ -964,6 +1032,25 @@ def _target_duration_windows(
         start_max = min(last_start, center + half_width)
         windows.append((start_min, start_max))
     return windows
+
+
+def _source_range_bounds(
+    duration: float,
+    source_start_seconds: float,
+    source_end_seconds: float,
+) -> tuple[float, float]:
+    source_duration = max(0.0, float(duration or 0.0))
+    if source_duration <= 0:
+        return 0.0, 0.0
+
+    start = min(max(0.0, float(source_start_seconds or 0.0)), source_duration)
+    end = float(source_end_seconds or 0.0)
+    if end <= 0 or end > source_duration:
+        end = source_duration
+    end = min(max(start + 0.1, end), source_duration)
+    if end <= start:
+        start = max(0.0, end - 0.1)
+    return start, end
 
 
 def _evenly_pick_windows(

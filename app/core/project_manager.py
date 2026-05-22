@@ -30,6 +30,7 @@ class ProjectData:
     script_style: str = "recap"
     rough_hook_text: str = ""
     rough_cut_settings: dict[str, Any] = field(default_factory=dict)
+    rough_cut_parts: list[dict[str, Any]] = field(default_factory=list)
     export_logs: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
@@ -101,6 +102,7 @@ class ProjectManager:
             script_style=str(payload.get("script_style") or "recap"),
             rough_hook_text=str(payload.get("rough_hook_text") or ""),
             rough_cut_settings=dict(payload.get("rough_cut_settings") or {}),
+            rough_cut_parts=list(payload.get("rough_cut_parts") or []),
             export_logs=list(payload.get("export_logs") or []),
             created_at=str(payload.get("created_at") or datetime.now().isoformat(timespec="seconds")),
             updated_at=str(payload.get("updated_at") or datetime.now().isoformat(timespec="seconds")),

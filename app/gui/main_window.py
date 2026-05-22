@@ -24,8 +24,12 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QAbstractItemView,
     QScrollArea,
     QSpinBox,
+    QHeaderView,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QTextEdit,
     QVBoxLayout,
@@ -39,6 +43,7 @@ from app.core.montage import (
     ROUGH_CUT_COLOR_GRADES,
     RoughCutConfig,
     build_conflict_hook,
+    combine_rough_cut_parts,
     detect_conflict_hook_segment,
     export_story_rough_cut,
 )
@@ -65,6 +70,7 @@ from app.gui.widgets import (
     ChecklistWidget,
     CutListTable,
     LogPanel,
+    RoughCutRangeSelector,
     SceneNotesTable,
     TranscriptTable,
     VideoCutEditorWidget,
@@ -148,6 +154,7 @@ class MainWindow(QMainWindow):
         self.project_manager = ProjectManager(self.app_root / "app" / "projects")
         self.project: ProjectData | None = None
         self.database: TranscriptDatabase | None = None
+        self.rough_cut_parts: list[dict[str, Any]] = []
         self._workers: list[TaskWorker] = []
         self._task_dialogs: dict[TaskWorker, TaskProgressDialog] = {}
         self._busy_count = 0
@@ -203,6 +210,7 @@ class MainWindow(QMainWindow):
             self.ocr_subtitle_button,
             self.export_button,
             self.export_rough_cut_button,
+            self.combine_rough_parts_button,
             self.generate_id_subtitle_button,
             self.refresh_project_button,
         ]
@@ -732,6 +740,21 @@ class MainWindow(QMainWindow):
 
         self._polish_rough_cut_controls()
 
+        range_group = QGroupBox("Source Range")
+        range_layout = QVBoxLayout(range_group)
+        range_layout.setContentsMargins(14, 24, 14, 14)
+        range_layout.setSpacing(10)
+        self.rough_range_selector = RoughCutRangeSelector()
+        self.rough_range_selector.rangeChanged.connect(self._rough_range_changed)
+        self.rough_range_label = QLabel("Import a video to choose the rough cut source range.")
+        self.rough_range_full_button = QPushButton("Use Full Video")
+        self.rough_range_full_button.clicked.connect(self.use_full_rough_range)
+        range_button_row = QHBoxLayout()
+        range_button_row.addWidget(self.rough_range_label, 1)
+        range_button_row.addWidget(self.rough_range_full_button)
+        range_layout.addWidget(self.rough_range_selector)
+        range_layout.addLayout(range_button_row)
+
         timing_group = QGroupBox("Timing")
         timing_group.setMinimumHeight(382)
         timing_layout = QFormLayout(timing_group)
@@ -793,10 +816,40 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.suggest_hook_button)
         button_row.addWidget(self.export_rough_cut_button)
 
+        parts_group = QGroupBox("Rough Cut Parts")
+        parts_layout = QVBoxLayout(parts_group)
+        parts_layout.setContentsMargins(12, 22, 12, 12)
+        parts_layout.setSpacing(10)
+        parts_button_row = QHBoxLayout()
+        self.remove_rough_part_button = QPushButton("Remove Selected Part")
+        self.combine_rough_parts_button = QPushButton("Combine Parts")
+        self.combine_rough_parts_button.setObjectName("PrimaryButton")
+        self.remove_rough_part_button.clicked.connect(self.remove_selected_rough_part)
+        self.combine_rough_parts_button.clicked.connect(self.combine_rough_cut_part_videos)
+        parts_button_row.addStretch(1)
+        parts_button_row.addWidget(self.remove_rough_part_button)
+        parts_button_row.addWidget(self.combine_rough_parts_button)
+
+        self.rough_parts_table = QTableWidget()
+        self.rough_parts_table.setColumnCount(3)
+        self.rough_parts_table.setHorizontalHeaderLabels(["Range", "File", "Status"])
+        self.rough_parts_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.rough_parts_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.rough_parts_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.rough_parts_table.verticalHeader().setVisible(False)
+        self.rough_parts_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.rough_parts_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.rough_parts_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.rough_parts_table.setMinimumHeight(170)
+        parts_layout.addLayout(parts_button_row)
+        parts_layout.addWidget(self.rough_parts_table)
+
+        content_layout.addWidget(range_group, 0)
         content_layout.addWidget(settings, 0)
         content_layout.addWidget(QLabel("Conflict hook notes"))
         content_layout.addWidget(self.rough_hook_edit, 0)
         content_layout.addLayout(button_row)
+        content_layout.addWidget(parts_group, 0)
         content_layout.addStretch(1)
         return page
 
@@ -1080,6 +1133,7 @@ class MainWindow(QMainWindow):
         self.project.metadata = None
         self.metadata_view.setText(metadata_to_text(None))
         self._refresh_visual_editor_video(0.0)
+        self._refresh_rough_range_selector(0.0)
         self._log(f"Imported video: {path}")
         self.save_project()
         self.read_metadata()
@@ -1100,6 +1154,7 @@ class MainWindow(QMainWindow):
             self.project.set_metadata(metadata)
             self.metadata_view.setText(metadata_to_text(metadata))
             self._refresh_visual_editor_video(metadata.duration)
+            self._refresh_rough_range_selector(metadata.duration)
             self._log("Metadata loaded.")
             if not metadata.has_audio:
                 self._show_warning("No audio stream was detected in this video.")
@@ -1571,6 +1626,53 @@ class MainWindow(QMainWindow):
         if self.project:
             self.save_project()
 
+    def use_full_rough_range(self) -> None:
+        if not getattr(self, "rough_range_selector", None):
+            return
+        duration = self.rough_range_selector.duration_seconds()
+        if self.project and self.project.metadata:
+            duration = VideoMetadata.from_dict(self.project.metadata).duration
+        self.rough_range_selector.set_range(0.0, duration)
+
+    def _rough_range_changed(self, start: float, end: float) -> None:
+        if not getattr(self, "rough_range_label", None):
+            return
+        if end <= start:
+            self.rough_range_label.setText("Import a video to choose the rough cut source range.")
+            return
+        self.rough_range_label.setText(
+            f"Selected source: {format_duration(start)} - {format_duration(end)}"
+        )
+
+    def _refresh_rough_range_selector(self, duration_seconds: float | None = None) -> None:
+        if not getattr(self, "rough_range_selector", None):
+            return
+        duration = duration_seconds or 0.0
+        if duration <= 0 and self.project and self.project.metadata:
+            duration = VideoMetadata.from_dict(self.project.metadata).duration
+        self.rough_range_selector.set_duration(duration)
+
+    def _rough_source_range(self) -> tuple[float, float]:
+        if not getattr(self, "rough_range_selector", None):
+            return 0.0, 0.0
+        return self.rough_range_selector.selected_range()
+
+    def _rough_range_label_text(self, start: float, end: float) -> str:
+        if end <= start:
+            return "Full video"
+        return f"{format_duration(start)} - {format_duration(end)}"
+
+    def _rough_range_filename_suffix(self, start: float, end: float) -> str:
+        if end <= start:
+            return ""
+        return f"_{self._time_for_filename(start)}_to_{self._time_for_filename(end)}"
+
+    def _time_for_filename(self, seconds: float) -> str:
+        total = int(round(max(0.0, seconds)))
+        hours, remainder = divmod(total, 3600)
+        minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}-{minutes:02d}-{secs:02d}"
+
     def choose_subtitle_output_file(self) -> None:
         if not self._require_project():
             return
@@ -1690,7 +1792,8 @@ class MainWindow(QMainWindow):
 
         default_dir = Path(self.project.project_dir) / "rough_cuts"
         default_dir.mkdir(exist_ok=True)
-        default_path = default_dir / "story_rough_cut.mp4"
+        range_start, range_end = self._rough_source_range()
+        default_path = default_dir / f"story_rough_cut{self._rough_range_filename_suffix(range_start, range_end)}.mp4"
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             "Save Rough Cut Video",
@@ -1713,6 +1816,8 @@ class MainWindow(QMainWindow):
                     transcript_records,
                     video_path,
                     hook_seconds=config.hook_seconds,
+                    source_start_seconds=config.source_start_seconds,
+                    source_end_seconds=config.source_end_seconds,
                 )
             output = export_story_rough_cut(
                 video_path=video_path,
@@ -1725,6 +1830,18 @@ class MainWindow(QMainWindow):
             return str(output)
 
         def done(path: str) -> None:
+            self._add_rough_cut_part(
+                {
+                    "range": self._rough_range_label_text(
+                        config.source_start_seconds,
+                        config.source_end_seconds,
+                    ),
+                    "source_start": config.source_start_seconds,
+                    "source_end": config.source_end_seconds,
+                    "path": path,
+                    "status": "Ready",
+                }
+            )
             self._log(f"Exported rough cut video: {path}")
             QMessageBox.information(
                 self,
@@ -1735,6 +1852,85 @@ class MainWindow(QMainWindow):
             self.save_project()
 
         self._start_task("Exporting rough cut video", task, done)
+
+    def remove_selected_rough_part(self) -> None:
+        row = self.rough_parts_table.currentRow()
+        if row < 0 or row >= len(self.rough_cut_parts):
+            self._show_warning("Select one rough cut part first.")
+            return
+        removed = self.rough_cut_parts.pop(row)
+        self._refresh_rough_parts_table()
+        self._log(f"Removed rough cut part from list: {removed.get('path', '')}")
+        self.save_project()
+
+    def combine_rough_cut_part_videos(self) -> None:
+        if not self._require_project():
+            return
+        parts = [part for part in self.rough_cut_parts if Path(str(part.get("path", ""))).exists()]
+        if not parts:
+            self._show_warning("Export at least one rough cut part first.")
+            return
+
+        assert self.project is not None
+        default_dir = Path(self.project.project_dir) / "rough_cuts"
+        default_dir.mkdir(exist_ok=True)
+        output_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Combined Rough Cut",
+            str(default_dir / "story_rough_cut_combined.mp4"),
+            "MP4 Video (*.mp4);;All Files (*)",
+        )
+        if not output_path:
+            return
+
+        part_paths = [str(part["path"]) for part in parts]
+
+        def task(progress: Callable[[str], None]) -> str:
+            output = combine_rough_cut_parts(
+                part_paths,
+                output_path,
+                progress_callback=progress,
+            )
+            return str(output)
+
+        def done(path: str) -> None:
+            self._log(f"Combined rough cut parts: {path}")
+            QMessageBox.information(
+                self,
+                "Combine Complete",
+                f"Combined rough cut video exported:\n{path}",
+            )
+
+        self._start_task("Combining rough cut parts", task, done)
+
+    def _add_rough_cut_part(self, part: dict[str, Any]) -> None:
+        self.rough_cut_parts.append(dict(part))
+        self._refresh_rough_parts_table()
+        self.save_project()
+
+    def _set_rough_cut_parts(self, parts: list[dict[str, Any]]) -> None:
+        self.rough_cut_parts = [dict(part) for part in parts or []]
+        self._refresh_rough_parts_table()
+
+    def _refresh_rough_parts_table(self) -> None:
+        if not getattr(self, "rough_parts_table", None):
+            return
+        self.rough_parts_table.setRowCount(len(self.rough_cut_parts))
+        for row, part in enumerate(self.rough_cut_parts):
+            path = str(part.get("path", ""))
+            range_text = str(part.get("range", "Full video"))
+            status = str(part.get("status", "Ready"))
+            if path and not Path(path).exists():
+                status = "Missing file"
+            self.rough_parts_table.setItem(row, 0, self._readonly_table_item(range_text))
+            self.rough_parts_table.setItem(row, 1, self._readonly_table_item(path))
+            self.rough_parts_table.setItem(row, 2, self._readonly_table_item(status))
+        self.rough_parts_table.resizeRowsToContents()
+
+    def _readonly_table_item(self, text: str) -> QTableWidgetItem:
+        item = QTableWidgetItem(text)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        return item
 
     def _generate_script_for_rough_cut(self, rough_cut_path: str) -> str | None:
         if not self.project:
@@ -1837,6 +2033,7 @@ class MainWindow(QMainWindow):
         return "\n".join(piece for piece in pieces if piece)
 
     def _rough_cut_config(self) -> RoughCutConfig:
+        source_start, source_end = self._rough_source_range()
         return RoughCutConfig(
             clip_seconds=self.rough_clip_seconds_spin.value(),
             sample_every_seconds=self.rough_sample_every_spin.value(),
@@ -1855,6 +2052,8 @@ class MainWindow(QMainWindow):
             color_grade=str(self.rough_color_grade_combo.currentData() or "review_warm"),
             background_audio_path=self.rough_music_path_input.text().strip(),
             background_audio_volume=self.rough_music_volume_spin.value(),
+            source_start_seconds=source_start,
+            source_end_seconds=source_end,
         )
 
     def _rough_cut_settings_dict(self) -> dict[str, Any]:
@@ -1876,6 +2075,8 @@ class MainWindow(QMainWindow):
             "color_grade": str(self.rough_color_grade_combo.currentData() or "review_warm"),
             "background_audio_path": self.rough_music_path_input.text().strip(),
             "background_audio_volume": float(self.rough_music_volume_spin.value()),
+            "source_start_seconds": float(self._rough_source_range()[0]),
+            "source_end_seconds": float(self._rough_source_range()[1]),
         }
 
     def _apply_rough_cut_settings(self, settings: dict[str, Any]) -> None:
@@ -1899,6 +2100,13 @@ class MainWindow(QMainWindow):
         self.rough_color_grade_combo.setCurrentIndex(color_index if color_index >= 0 else 0)
         self.rough_music_path_input.setText(str(settings.get("background_audio_path", "")))
         self.rough_music_volume_spin.setValue(float(settings.get("background_audio_volume", 0.22)))
+        if getattr(self, "rough_range_selector", None):
+            source_end = float(settings.get("source_end_seconds", 0.0) or 0.0)
+            if source_end > 0:
+                self.rough_range_selector.set_range(
+                    float(settings.get("source_start_seconds", 0.0) or 0.0),
+                    source_end,
+                )
 
     def save_script_text(self) -> None:
         if not self._require_project():
@@ -1953,12 +2161,14 @@ class MainWindow(QMainWindow):
         metadata = VideoMetadata.from_dict(data.metadata) if data.metadata else None
         self.metadata_view.setText(metadata_to_text(metadata))
         self._refresh_visual_editor_video(metadata.duration if metadata else None)
+        self._refresh_rough_range_selector(metadata.duration if metadata else None)
         self.scene_table.set_scene_notes(data.scene_notes)
         self.cut_table.set_cut_items(data.cut_list)
         self.checklist_widget.set_states(data.checklist)
         self.script_edit.setPlainText(data.script_text)
         self.rough_hook_edit.setPlainText(data.rough_hook_text)
         self._apply_rough_cut_settings(data.rough_cut_settings)
+        self._set_rough_cut_parts(data.rough_cut_parts)
         style_index = self.script_style_combo.findData(data.script_style)
         self.script_style_combo.setCurrentIndex(style_index if style_index >= 0 else 0)
         language_index = self.script_language_combo.findData(data.script_language)
@@ -1979,6 +2189,7 @@ class MainWindow(QMainWindow):
         self.project.script_style = str(self.script_style_combo.currentData() or "recap")
         self.project.rough_hook_text = self.rough_hook_edit.toPlainText()
         self.project.rough_cut_settings = self._rough_cut_settings_dict()
+        self.project.rough_cut_parts = [dict(part) for part in self.rough_cut_parts]
 
     def _refresh_transcript_table(self) -> None:
         if not self.database:
