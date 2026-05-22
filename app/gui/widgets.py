@@ -4,16 +4,27 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QSize, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QDoubleSpinBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -120,11 +131,430 @@ class CutListTable(QTableWidget):
         rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
         return [all_items[row] for row in rows if 0 <= row < len(all_items)]
 
+    def update_first_selected_range(self, start: float, end: float) -> dict[str, Any] | None:
+        rows = sorted({index.row() for index in self.selectionModel().selectedRows()})
+        if not rows:
+            return None
+
+        row = rows[0]
+        start_text = format_duration(start)
+        end_text = format_duration(end)
+        self.item(row, 1).setText(start_text)
+        self.item(row, 2).setText(end_text)
+
+        id_item = self.item(row, 0)
+        if id_item:
+            data = dict(id_item.data(Qt.ItemDataRole.UserRole) or {})
+            data["start"] = start_text
+            data["end"] = end_text
+            id_item.setData(Qt.ItemDataRole.UserRole, data)
+
+        return self.to_cut_items()[row]
+
     def remove_selected_rows(self) -> int:
         rows = sorted({index.row() for index in self.selectionModel().selectedRows()}, reverse=True)
         for row in rows:
             self.removeRow(row)
         return len(rows)
+
+
+class RangeTimeline(QWidget):
+    seekRequested = pyqtSignal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._duration_ms = 0
+        self._position_ms = 0
+        self._in_ms = 0
+        self._out_ms = 0
+        self.setMinimumHeight(58)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_duration(self, duration_ms: int) -> None:
+        self._duration_ms = max(0, int(duration_ms))
+        if self._duration_ms <= 0:
+            self._position_ms = 0
+            self._in_ms = 0
+            self._out_ms = 0
+        else:
+            self._position_ms = min(self._position_ms, self._duration_ms)
+            self._in_ms = min(self._in_ms, self._duration_ms)
+            self._out_ms = min(max(self._out_ms, self._in_ms), self._duration_ms)
+        self.update()
+
+    def set_position(self, position_ms: int) -> None:
+        self._position_ms = self._clamp_ms(position_ms)
+        self.update()
+
+    def set_range(self, in_ms: int, out_ms: int) -> None:
+        self._in_ms = self._clamp_ms(in_ms)
+        self._out_ms = self._clamp_ms(max(out_ms, in_ms))
+        self.update()
+
+    def mousePressEvent(self, event: Any) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._seek_from_x(int(event.position().x()))
+
+    def mouseMoveEvent(self, event: Any) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._seek_from_x(int(event.position().x()))
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        track = self.rect().adjusted(12, 20, -12, -18)
+        track.setHeight(14)
+        radius = 7
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#2f3b4e"))
+        painter.drawRoundedRect(track, radius, radius)
+
+        if self._duration_ms <= 0:
+            painter.setPen(QColor("#94a3b8"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Import video untuk mulai cut visual")
+            return
+
+        in_x = self._x_for_ms(self._in_ms, track.left(), track.width())
+        out_x = self._x_for_ms(self._out_ms, track.left(), track.width())
+        pos_x = self._x_for_ms(self._position_ms, track.left(), track.width())
+
+        selection_width = max(4, out_x - in_x)
+        selection = track.adjusted(in_x - track.left(), -2, -(track.right() - out_x), 2)
+        selection.setWidth(selection_width)
+        painter.setBrush(QColor("#2563eb"))
+        painter.drawRoundedRect(selection, radius, radius)
+
+        painter.setBrush(QColor("#e5e7eb"))
+        for handle_x in (in_x, out_x):
+            painter.drawRoundedRect(handle_x - 3, track.top() - 6, 6, track.height() + 12, 3, 3)
+
+        pen = QPen(QColor("#f97316"), 2)
+        painter.setPen(pen)
+        painter.drawLine(pos_x, track.top() - 10, pos_x, track.bottom() + 10)
+
+        painter.setPen(QColor("#cbd5e1"))
+        painter.drawText(12, self.height() - 4, format_duration(self._in_ms / 1000))
+        painter.drawText(
+            self.width() - 92,
+            self.height() - 4,
+            format_duration(self._out_ms / 1000),
+        )
+
+    def _seek_from_x(self, x: int) -> None:
+        if self._duration_ms <= 0:
+            return
+        track = self.rect().adjusted(12, 20, -12, -18)
+        ratio = (x - track.left()) / max(1, track.width())
+        self.seekRequested.emit(self._clamp_ms(round(ratio * self._duration_ms)))
+
+    def _x_for_ms(self, value_ms: int, left: int, width: int) -> int:
+        ratio = self._clamp_ms(value_ms) / max(1, self._duration_ms)
+        return left + round(width * ratio)
+
+    def _clamp_ms(self, value_ms: int) -> int:
+        if self._duration_ms <= 0:
+            return 0
+        return max(0, min(int(value_ms), self._duration_ms))
+
+
+class VideoCutEditorWidget(QWidget):
+    addClipRequested = pyqtSignal(float, float, str)
+    updateClipRequested = pyqtSignal(float, float)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._video_path = ""
+        self._duration_ms = 0
+        self._position_ms = 0
+        self._range_preview = False
+        self._syncing_range = False
+
+        self.player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_output.setVolume(0.65)
+        self.player.setAudioOutput(self.audio_output)
+
+        self.video_widget = QVideoWidget()
+        self.video_widget.setObjectName("VideoPreview")
+        self.video_widget.setMinimumSize(420, 220)
+        self.video_widget.setMaximumHeight(340)
+        self.video_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        self.player.setVideoOutput(self.video_widget)
+
+        self.file_label = QLabel("No video loaded")
+        self.file_label.setObjectName("PanelTitle")
+        self.status_label = QLabel("Ready")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.play_button = QToolButton()
+        self.play_button.setObjectName("TransportButton")
+        self.play_button.setToolTip("Play / pause preview")
+        self.back_button = QToolButton()
+        self.back_button.setObjectName("TransportButton")
+        self.back_button.setToolTip("Mundur 1 detik")
+        self.forward_button = QToolButton()
+        self.forward_button.setObjectName("TransportButton")
+        self.forward_button.setToolTip("Maju 1 detik")
+
+        style = self.style()
+        self.play_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.back_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekBackward))
+        self.forward_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
+
+        for button in (self.play_button, self.back_button, self.forward_button):
+            button.setIconSize(QSize(18, 18))
+            button.setFixedSize(36, 34)
+
+        self.position_slider = QSlider(Qt.Orientation.Horizontal)
+        self.position_slider.setRange(0, 0)
+        self.time_label = QLabel("00:00.000 / 00:00.000")
+        self.time_label.setMinimumWidth(170)
+        self.time_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.timeline = RangeTimeline()
+
+        self.in_spin = QDoubleSpinBox()
+        self.out_spin = QDoubleSpinBox()
+        for spin in (self.in_spin, self.out_spin):
+            spin.setDecimals(3)
+            spin.setRange(0.0, 0.0)
+            spin.setSingleStep(0.1)
+            spin.setSuffix(" sec")
+            spin.setMinimumHeight(32)
+
+        self.mark_in_button = QPushButton("Mark In")
+        self.mark_out_button = QPushButton("Mark Out")
+        self.preview_range_button = QPushButton("Preview Range")
+        self.add_clip_button = QPushButton("Add Cut")
+        self.apply_clip_button = QPushButton("Apply to Selected")
+        self.add_clip_button.setObjectName("PrimaryButton")
+
+        self._build_layout()
+        self._connect_signals()
+        self.set_video("", 0.0)
+
+    def set_video(self, video_path: str, duration_seconds: float | None = None) -> None:
+        self._video_path = video_path
+        self._range_preview = False
+        self.player.stop()
+
+        if not video_path:
+            self.player.setSource(QUrl())
+            self.file_label.setText("No video loaded")
+            self.status_label.setText("Import video untuk membuka editor visual")
+            self._set_duration_ms(0)
+            self._set_enabled(False)
+            return
+
+        source = Path(video_path)
+        self.file_label.setText(source.name)
+        self.status_label.setText(str(source))
+        self.player.setSource(QUrl.fromLocalFile(str(source)))
+        self._set_enabled(True)
+
+        duration_ms = int(round(max(0.0, float(duration_seconds or 0.0)) * 1000))
+        self._set_duration_ms(duration_ms)
+        default_out = min(5.0, self.duration_seconds()) if self.duration_seconds() else 0.0
+        self.set_clip_range(0.0, default_out, seek=True)
+
+    def set_clip_range(self, start: float, end: float, seek: bool = False) -> None:
+        duration = self.duration_seconds()
+        start = max(0.0, float(start or 0.0))
+        end = max(start, float(end or 0.0))
+        if duration > 0:
+            start = min(start, duration)
+            end = min(max(end, start), duration)
+        if duration > 0 and end <= start:
+            end = min(duration, start + 0.1)
+
+        self._syncing_range = True
+        self.in_spin.setValue(start)
+        self.out_spin.setValue(end)
+        self._syncing_range = False
+        self.timeline.set_range(round(start * 1000), round(end * 1000))
+
+        if seek:
+            self.seek_to_ms(round(start * 1000))
+
+    def duration_seconds(self) -> float:
+        return max(0.0, self._duration_ms / 1000)
+
+    def seek_to_ms(self, position_ms: int) -> None:
+        if self._duration_ms <= 0:
+            return
+        position_ms = max(0, min(int(position_ms), self._duration_ms))
+        self.player.setPosition(position_ms)
+        self._on_position_changed(position_ms)
+
+    def _build_layout(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.addWidget(self.file_label, 1)
+        header.addWidget(self.status_label, 1)
+
+        transport = QHBoxLayout()
+        transport.addWidget(self.back_button)
+        transport.addWidget(self.play_button)
+        transport.addWidget(self.forward_button)
+        transport.addWidget(self.position_slider, 1)
+        transport.addWidget(self.time_label)
+
+        range_panel = QFrame()
+        range_panel.setObjectName("EditorPanel")
+        range_layout = QGridLayout(range_panel)
+        range_layout.setContentsMargins(12, 12, 12, 12)
+        range_layout.setHorizontalSpacing(10)
+        range_layout.setVerticalSpacing(8)
+        range_layout.addWidget(QLabel("Start"), 0, 0)
+        range_layout.addWidget(self.in_spin, 0, 1)
+        range_layout.addWidget(QLabel("End"), 0, 2)
+        range_layout.addWidget(self.out_spin, 0, 3)
+        range_layout.addWidget(self.mark_in_button, 1, 0)
+        range_layout.addWidget(self.mark_out_button, 1, 1)
+        range_layout.addWidget(self.preview_range_button, 1, 2)
+        range_layout.addWidget(self.add_clip_button, 1, 3)
+        range_layout.addWidget(self.apply_clip_button, 1, 4)
+        range_layout.addWidget(self.timeline, 2, 0, 1, 6)
+        range_layout.setColumnStretch(5, 1)
+
+        layout.addLayout(header)
+        layout.addWidget(self.video_widget, 1)
+        layout.addLayout(transport)
+        layout.addWidget(range_panel)
+
+    def _connect_signals(self) -> None:
+        self.play_button.clicked.connect(self._toggle_playback)
+        self.back_button.clicked.connect(lambda: self.seek_to_ms(self._position_ms - 1000))
+        self.forward_button.clicked.connect(lambda: self.seek_to_ms(self._position_ms + 1000))
+        self.position_slider.sliderMoved.connect(self.seek_to_ms)
+        self.timeline.seekRequested.connect(self.seek_to_ms)
+        self.in_spin.valueChanged.connect(self._range_spin_changed)
+        self.out_spin.valueChanged.connect(self._range_spin_changed)
+        self.mark_in_button.clicked.connect(self._mark_in)
+        self.mark_out_button.clicked.connect(self._mark_out)
+        self.preview_range_button.clicked.connect(self._preview_range)
+        self.add_clip_button.clicked.connect(self._emit_add_clip)
+        self.apply_clip_button.clicked.connect(self._emit_update_clip)
+        self.player.positionChanged.connect(self._on_position_changed)
+        self.player.durationChanged.connect(self._on_duration_changed)
+        self.player.playbackStateChanged.connect(self._sync_play_button)
+        self.player.errorOccurred.connect(self._on_playback_error)
+
+    def _set_enabled(self, enabled: bool) -> None:
+        for widget in [
+            self.video_widget,
+            self.play_button,
+            self.back_button,
+            self.forward_button,
+            self.position_slider,
+            self.in_spin,
+            self.out_spin,
+            self.mark_in_button,
+            self.mark_out_button,
+            self.preview_range_button,
+            self.add_clip_button,
+            self.apply_clip_button,
+        ]:
+            widget.setEnabled(enabled)
+
+    def _set_duration_ms(self, duration_ms: int) -> None:
+        self._duration_ms = max(0, int(duration_ms))
+        max_seconds = self.duration_seconds()
+        self.position_slider.setRange(0, self._duration_ms)
+        for spin in (self.in_spin, self.out_spin):
+            spin.setRange(0.0, max_seconds)
+        self.timeline.set_duration(self._duration_ms)
+        self._on_position_changed(min(self._position_ms, self._duration_ms))
+
+    def _on_position_changed(self, position_ms: int) -> None:
+        self._position_ms = max(0, min(int(position_ms), max(0, self._duration_ms)))
+        self.position_slider.blockSignals(True)
+        self.position_slider.setValue(self._position_ms)
+        self.position_slider.blockSignals(False)
+        self.timeline.set_position(self._position_ms)
+        self.time_label.setText(
+            f"{format_duration(self._position_ms / 1000)} / {format_duration(self.duration_seconds())}"
+        )
+
+        if self._range_preview and self._position_ms >= round(self.out_spin.value() * 1000):
+            self._range_preview = False
+            self.player.pause()
+            self.seek_to_ms(round(self.out_spin.value() * 1000))
+
+    def _on_duration_changed(self, duration_ms: int) -> None:
+        if duration_ms <= 0:
+            return
+        old_duration = self._duration_ms
+        self._set_duration_ms(duration_ms)
+        if old_duration <= 0:
+            self.set_clip_range(0.0, min(5.0, self.duration_seconds()), seek=False)
+
+    def _on_playback_error(self, error: QMediaPlayer.Error, error_string: str) -> None:
+        if error == QMediaPlayer.Error.NoError:
+            return
+        self.status_label.setText(error_string or "Preview tidak bisa diputar di sistem ini")
+
+    def _sync_play_button(self, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        else:
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        self.play_button.setIcon(icon)
+
+    def _toggle_playback(self) -> None:
+        if not self._video_path:
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self._range_preview = False
+            self.player.pause()
+        else:
+            self._range_preview = False
+            self.player.play()
+
+    def _mark_in(self) -> None:
+        current = self._position_ms / 1000
+        self.set_clip_range(current, max(self.out_spin.value(), current + 0.1), seek=False)
+
+    def _mark_out(self) -> None:
+        current = self._position_ms / 1000
+        self.set_clip_range(min(self.in_spin.value(), current - 0.1), current, seek=False)
+
+    def _preview_range(self) -> None:
+        if not self._video_path or self.out_spin.value() <= self.in_spin.value():
+            return
+        self._range_preview = True
+        self.seek_to_ms(round(self.in_spin.value() * 1000))
+        self.player.play()
+
+    def _range_spin_changed(self) -> None:
+        if self._syncing_range:
+            return
+        self.set_clip_range(self.in_spin.value(), self.out_spin.value(), seek=False)
+
+    def _emit_add_clip(self) -> None:
+        start, end = self._range_seconds()
+        if end <= start:
+            return
+        label = f"Visual cut {format_duration(start)} - {format_duration(end)}"
+        self.addClipRequested.emit(start, end, label)
+
+    def _emit_update_clip(self) -> None:
+        start, end = self._range_seconds()
+        if end <= start:
+            return
+        self.updateClipRequested.emit(start, end)
+
+    def _range_seconds(self) -> tuple[float, float]:
+        return float(self.in_spin.value()), float(self.out_spin.value())
 
 
 class SceneNotesTable(QTableWidget):

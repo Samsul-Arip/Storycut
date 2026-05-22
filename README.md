@@ -6,7 +6,8 @@ The app does not include features for bypassing copyright detection, evading Con
 
 ## Features
 
-- Create, save, and load local projects.
+- Create, save, and load local projects from a chosen `.storycut.json` location.
+- Refresh the currently loaded project from disk with `Refresh Project` or `F5` without restarting the app.
 - Import large video files by path without copying the source media.
 - Read duration, file size, resolution, FPS, codecs, and audio availability with FFprobe.
 - Extract mono WAV audio with FFmpeg for transcription.
@@ -18,7 +19,9 @@ The app does not include features for bypassing copyright detection, evading Con
 - Draft visual scene notes automatically with an optional local BLIP vision model.
 - Search transcript text and view results in a table.
 - Add transcript segments to an editable cut list.
+- Visually preview the imported video, scrub the timeline, mark in/out points, and add cuts like a conventional video editor.
 - Edit clip start and end timestamps manually.
+- Apply a visual timeline selection directly to an existing cut list row.
 - Export selected clips with FFmpeg.
 - Build one chronological random rough-cut video from short source clips.
 - Keep rough-cut source clips at five seconds or shorter.
@@ -80,7 +83,7 @@ The app does not require paid APIs or web services. faster-whisper runs locally.
 
 The script generator can output an Indonesian draft. The `Alur Cerita Film` mode cleans transcript/subtitle text into a ready-to-read recap narration, similar to Indonesian movie recap scripts. It is rule-based, so it works best when the transcript already contains narration or Indonesian subtitle text. Raw foreign-language audio should be paired with Indonesian subtitles, then use `Extract ID Subtitles`, `Import Subtitle File`, or `OCR Burned Subtitles`.
 
-For visual context, use the `Scenes` tab. `Extract Scene Frames` takes periodic thumbnails from the video. Write short notes in the `Visual Note` column, for example `dua saudara duduk di bawah pohon` or `mobil van menabrak korban`. When you generate `Alur Cerita Film`, those visual notes are included so the draft can describe what happens on screen instead of relying only on dialogue.
+For visual clip editing, use the `Visual Cut` tab. Import a video, scrub the preview timeline, click `Mark In` and `Mark Out`, then click `Add Cut` to place that range in the cut list. Selecting an existing cut row loads its range back into the visual editor, so you can adjust the start/end points and click `Apply to Selected`.
 
 For visual rough cuts, use the `Rough Cut` tab. It samples source clips at five seconds or shorter, keeps them in chronological order, puts a short conflict video clip at the start, fills each scene with nearby snippets so it has enough narration space, targets an approximate final duration, and exports one MP4. The rough-cut controls can add light zoom, alternating mirror, fade transitions, and color grading for review/storytelling rhythm. Source audio is muted by default; choose a royalty-free music file if you want a new background track. These tools are provided for original commentary, review, and education, not for hiding or disguising copyrighted footage.
 
@@ -158,26 +161,20 @@ powershell -ExecutionPolicy Bypass -File .\create_desktop_shortcut.ps1
 
 Then double-click `StoryCut AI` on the Desktop. The shortcut uses `launch_storycut_ai.vbs`, which starts the app with `pythonw.exe` so no terminal window opens.
 
+## Refresh Project Without Restarting
+
+Click `Refresh Project` or press `F5` to reload the currently opened `.storycut.json` file from disk. This is useful when project data changes while the app is already open. Python code changes still require restarting the app process.
+
 ## Basic Workflow
 
-1. Click `New Project`.
+1. Click `New Project`, enter a name, then choose where to save the `.storycut.json` project file.
 2. Click `Import Video`.
 3. Confirm metadata appears in the Media panel.
-4. Open `Scenes`, click `Extract Scene Frames`, then write/edit short visual notes for important frames.
-5. Optional: click `Auto Describe Empty Notes` to draft visual notes automatically, then edit anything that is wrong.
-6. Click `Extract Audio`.
-7. For foreign voice narration, click `Voice -> ID Script` after installing translation support.
-8. Or choose a local faster-whisper model name/path, then click `Transcribe`.
-9. If the video has embedded Indonesian subtitles, click `Extract ID Subtitles`.
-10. If the Indonesian subtitle is burned into the video image, click `OCR Burned Subtitles`.
-11. Or click `Import Subtitle File` / `Import TXT Transcript` if you already have a subtitle/transcript file.
-12. Search the transcript and select useful segments.
-13. Click `Add Selected to Cut List`.
-14. Adjust clip start/end timestamps if needed.
-15. Select cut list rows and click `Export Selected Clips`.
-16. Open `Rough Cut`, keep `Clip length` at `5 sec`, set `Target final duration` around `10-15 min`, keep the short conflict hook and nearby clips enabled, choose a royalty-free music file if needed, click `Suggest Conflict Hook`, then click `Export Rough Cut Video`.
-17. Choose `Alur Cerita Film` and `Bahasa Indonesia` in the Script tab, then generate a read-aloud recap script.
-18. Click `Save Script TXT` to save the narration as a plain text file.
+4. Open `Visual Cut`, scrub the video preview, use `Mark In` / `Mark Out`, then click `Add Cut`.
+5. Select a cut row to load its range back into the visual editor, adjust it, then click `Apply to Selected`.
+6. Select cut list rows and click `Export Selected Clips`.
+7. Open `Rough Cut`, keep `Clip length` at `5 sec`, set `Target final duration` around `10-15 min`, keep the short conflict hook and nearby clips enabled, choose a royalty-free music file if needed, click `Suggest Conflict Hook`, then click `Export Rough Cut Video`.
+8. Open `Subtitle Indonesia` to generate Indonesian SRT subtitles from video audio when needed.
 
 ## Timestamp Format
 
@@ -217,7 +214,7 @@ If you bundle FFmpeg this way, update the app later to resolve the packaged bina
 
 ## Notes For Future Improvements
 
-- Add a video preview player and waveform-based trimming.
+- Add waveform-based trimming.
 - Add scene-change detection so visual frames are sampled by shot boundaries instead of only fixed intervals.
 - Add local model path browsing for faster-whisper.
 - Add optional speaker labels when a reliable local diarization path is chosen.

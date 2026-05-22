@@ -47,10 +47,7 @@ class ProjectManager:
         clean_name = _safe_name(name)
         project_dir = _unique_project_dir(self.projects_root / clean_name)
         project_dir.mkdir(parents=True, exist_ok=False)
-        (project_dir / "audio").mkdir(exist_ok=True)
-        (project_dir / "clips").mkdir(exist_ok=True)
-        (project_dir / "scene_frames").mkdir(exist_ok=True)
-        (project_dir / "rough_cuts").mkdir(exist_ok=True)
+        _ensure_project_dirs(project_dir)
 
         project_file = project_dir / f"{project_dir.name}{PROJECT_EXTENSION}"
         data = ProjectData(
@@ -58,6 +55,21 @@ class ProjectManager:
             project_dir=str(project_dir),
             database_path=str(project_dir / "transcript.sqlite3"),
             project_file=str(project_file),
+        )
+        self.save_project(data)
+        return data
+
+    def create_project_at(self, name: str, project_file: str | Path) -> ProjectData:
+        path = _with_project_extension(Path(project_file))
+        project_dir = path.parent
+        project_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_project_dirs(project_dir)
+
+        data = ProjectData(
+            name=name.strip() or _project_name_from_file(path),
+            project_dir=str(project_dir),
+            database_path=str(project_dir / "transcript.sqlite3"),
+            project_file=str(path),
         )
         self.save_project(data)
         return data
@@ -110,6 +122,27 @@ def _safe_name(value: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_. -]+", "", value.strip())
     clean = re.sub(r"\s+", "_", clean).strip("._ ")
     return clean or "StoryCut_Project"
+
+
+def _ensure_project_dirs(project_dir: Path) -> None:
+    (project_dir / "audio").mkdir(exist_ok=True)
+    (project_dir / "clips").mkdir(exist_ok=True)
+    (project_dir / "scene_frames").mkdir(exist_ok=True)
+    (project_dir / "rough_cuts").mkdir(exist_ok=True)
+
+
+def _with_project_extension(path: Path) -> Path:
+    text = str(path)
+    if text.lower().endswith(PROJECT_EXTENSION):
+        return path
+    return Path(f"{text}{PROJECT_EXTENSION}")
+
+
+def _project_name_from_file(path: Path) -> str:
+    name = path.name
+    if name.lower().endswith(PROJECT_EXTENSION):
+        name = name[: -len(PROJECT_EXTENSION)]
+    return name or path.stem or "StoryCut_Project"
 
 
 def _unique_project_dir(path: Path) -> Path:

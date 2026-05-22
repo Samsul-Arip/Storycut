@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -58,7 +59,14 @@ from app.core.transcriber import WhisperTranscriber
 from app.core.translator import LocalIndonesianTranslator
 from app.core.video_utils import VideoMetadata, format_duration, metadata_to_text, read_video_metadata
 from app.core.vision_captioner import auto_caption_scene_notes
-from app.gui.widgets import ChecklistWidget, CutListTable, LogPanel, SceneNotesTable, TranscriptTable
+from app.gui.widgets import (
+    ChecklistWidget,
+    CutListTable,
+    LogPanel,
+    SceneNotesTable,
+    TranscriptTable,
+    VideoCutEditorWidget,
+)
 
 
 TaskFunction = Callable[[Callable[[str], None]], Any]
@@ -95,29 +103,43 @@ class MainWindow(QMainWindow):
         self._busy_count = 0
 
         self._build_ui()
+        self.refresh_shortcut = QShortcut(QKeySequence("F5"), self)
+        self.refresh_shortcut.activated.connect(self.refresh_project)
         self._set_project_label()
         self.statusBar().showMessage("Ready")
 
     def _build_ui(self) -> None:
+        self._apply_modern_theme()
+
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
 
         layout.addWidget(self._build_project_group())
         layout.addWidget(self._build_media_group())
 
-        self._hidden_pages = [
-            self._build_scenes_tab(),
-            self._build_transcript_tab(),
-            self._build_cuts_tab(),
-            self._build_script_tab(),
-            self._build_checklist_tab(),
-            self._build_logs_tab(),
-        ]
-
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_rough_cut_tab(), "Rough Cut")
-        self.tabs.addTab(self._build_indonesian_subtitle_tab(), "Subtitle Indonesia")
+        self.cuts_tab = self._build_cuts_tab()
+        self.rough_cut_tab = self._build_rough_cut_tab()
+        self.subtitle_tab = self._build_indonesian_subtitle_tab()
+        self.transcript_tab = self._build_transcript_tab()
+        self.scenes_tab = self._build_scenes_tab()
+        self.script_tab = self._build_script_tab()
+        self.checklist_tab = self._build_checklist_tab()
+        self.logs_tab = self._build_logs_tab()
+
+        self.tabs.addTab(self.cuts_tab, "Visual Cut")
+        self.tabs.addTab(self.rough_cut_tab, "Rough Cut")
+        self.tabs.addTab(self.subtitle_tab, "Subtitle Indonesia")
+        self._hidden_pages = [
+            self.transcript_tab,
+            self.scenes_tab,
+            self.script_tab,
+            self.checklist_tab,
+            self.logs_tab,
+        ]
         layout.addWidget(self.tabs, 1)
 
         self.long_task_buttons = [
@@ -132,7 +154,207 @@ class MainWindow(QMainWindow):
             self.export_button,
             self.export_rough_cut_button,
             self.generate_id_subtitle_button,
+            self.refresh_project_button,
         ]
+
+    def _apply_modern_theme(self) -> None:
+        self.setStyleSheet(
+            """
+            QMainWindow, QWidget {
+                background: #0b1018;
+                color: #e5e7eb;
+                font-family: "Segoe UI";
+                font-size: 10pt;
+            }
+            QGroupBox {
+                background: #141b26;
+                border: 1px solid #263244;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 14px 12px 12px 12px;
+                font-weight: 600;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 5px;
+                background: #0b1018;
+                color: #cbd5e1;
+            }
+            QFrame#EditorPanel {
+                background: #111827;
+                border: 1px solid #263244;
+                border-radius: 8px;
+            }
+            QVideoWidget#VideoPreview {
+                background: #030712;
+                border: 1px solid #263244;
+                border-radius: 8px;
+            }
+            QLabel#PanelTitle {
+                color: #f8fafc;
+                font-size: 12pt;
+                font-weight: 700;
+            }
+            QPushButton, QToolButton {
+                background: #1f2937;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                color: #e5e7eb;
+                padding: 7px 12px;
+                min-height: 28px;
+            }
+            QToolButton#TransportButton {
+                padding: 4px;
+                min-width: 34px;
+                min-height: 32px;
+            }
+            QPushButton:hover, QToolButton:hover {
+                background: #263244;
+                border-color: #60a5fa;
+            }
+            QPushButton:pressed, QToolButton:pressed {
+                background: #172033;
+            }
+            QPushButton#PrimaryButton {
+                background: #2563eb;
+                border-color: #3b82f6;
+                color: #f8fafc;
+                font-weight: 700;
+            }
+            QPushButton#PrimaryButton:hover {
+                background: #1d4ed8;
+            }
+            QPushButton:disabled, QToolButton:disabled {
+                color: #64748b;
+                background: #111827;
+                border-color: #263244;
+            }
+            QLineEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                background: #0f172a;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                color: #e5e7eb;
+                padding: 5px 8px;
+                selection-background-color: #1d4ed8;
+                selection-color: #f8fafc;
+            }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus,
+            QSpinBox:focus, QDoubleSpinBox:focus {
+                border-color: #60a5fa;
+            }
+            QComboBox QAbstractItemView {
+                background: #111827;
+                border: 1px solid #334155;
+                color: #e5e7eb;
+                selection-background-color: #2563eb;
+                selection-color: #f8fafc;
+            }
+            QCheckBox {
+                color: #dbe4ef;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #475569;
+                background: #0f172a;
+            }
+            QCheckBox::indicator:checked {
+                background: #2563eb;
+                border-color: #60a5fa;
+            }
+            QTabWidget::pane {
+                border: 1px solid #263244;
+                border-radius: 8px;
+                background: #111827;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #151f2e;
+                border: 1px solid #263244;
+                border-bottom-color: #263244;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                color: #94a3b8;
+                padding: 9px 14px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:hover {
+                background: #1f2937;
+                color: #dbe4ef;
+            }
+            QTabBar::tab:selected {
+                background: #111827;
+                border-bottom-color: #111827;
+                color: #f8fafc;
+                font-weight: 700;
+            }
+            QTableWidget {
+                background: #0f172a;
+                alternate-background-color: #111827;
+                border: 1px solid #263244;
+                border-radius: 8px;
+                gridline-color: #263244;
+                color: #e5e7eb;
+                selection-background-color: #1d4ed8;
+                selection-color: #f8fafc;
+            }
+            QHeaderView::section {
+                background: #172033;
+                border: 0;
+                border-right: 1px solid #263244;
+                border-bottom: 1px solid #263244;
+                color: #cbd5e1;
+                font-weight: 700;
+                padding: 7px 8px;
+            }
+            QTableCornerButton::section {
+                background: #172033;
+                border: 0;
+            }
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #2f3b4e;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #f97316;
+                border: 1px solid #ea580c;
+                width: 14px;
+                margin: -5px 0;
+                border-radius: 7px;
+            }
+            QScrollArea {
+                border: 0;
+                background: transparent;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background: #0b1018;
+                border: 0;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background: #334155;
+                border-radius: 6px;
+                min-height: 24px;
+                min-width: 24px;
+            }
+            QScrollBar::handle:hover {
+                background: #475569;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0;
+                height: 0;
+            }
+            QStatusBar {
+                background: #111827;
+                color: #94a3b8;
+                border-top: 1px solid #263244;
+            }
+            """
+        )
 
     def _build_project_group(self) -> QGroupBox:
         group = QGroupBox("Project")
@@ -141,15 +363,19 @@ class MainWindow(QMainWindow):
         self.project_label = QLabel()
         self.new_project_button = QPushButton("New Project")
         self.load_project_button = QPushButton("Load Project")
+        self.refresh_project_button = QPushButton("Refresh Project")
+        self.refresh_project_button.setToolTip("Reload current project from disk (F5)")
         self.save_project_button = QPushButton("Save Project")
 
         self.new_project_button.clicked.connect(self.new_project)
         self.load_project_button.clicked.connect(self.load_project)
+        self.refresh_project_button.clicked.connect(self.refresh_project)
         self.save_project_button.clicked.connect(lambda: self.save_project(show_message=True))
 
         layout.addWidget(self.project_label, 1)
         layout.addWidget(self.new_project_button)
         layout.addWidget(self.load_project_button)
+        layout.addWidget(self.refresh_project_button)
         layout.addWidget(self.save_project_button)
         return group
 
@@ -276,19 +502,53 @@ class MainWindow(QMainWindow):
     def _build_cuts_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(scroll_area, 1)
+
+        content = QWidget()
+        scroll_area.setWidget(content)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 14, 14, 24)
+        content_layout.setSpacing(12)
+
+        self.visual_cut_editor = VideoCutEditorWidget()
+        self.visual_cut_editor.setMinimumHeight(420)
+        self.visual_cut_editor.setMaximumHeight(560)
+        self.visual_cut_editor.addClipRequested.connect(self.add_visual_cut_to_list)
+        self.visual_cut_editor.updateClipRequested.connect(self.apply_visual_range_to_selected_cut)
+        content_layout.addWidget(self.visual_cut_editor, 0)
+
+        cut_panel = QGroupBox("Cut List")
+        cut_layout = QVBoxLayout(cut_panel)
+        cut_layout.setContentsMargins(12, 22, 12, 12)
+        cut_layout.setSpacing(10)
 
         row = QHBoxLayout()
         self.remove_cut_button = QPushButton("Remove Selected")
         self.export_button = QPushButton("Export Selected Clips")
+        self.export_button.setObjectName("PrimaryButton")
         self.remove_cut_button.clicked.connect(self.remove_selected_cuts)
         self.export_button.clicked.connect(self.export_selected_clips)
         row.addStretch(1)
         row.addWidget(self.remove_cut_button)
         row.addWidget(self.export_button)
-        layout.addLayout(row)
+        cut_layout.addLayout(row)
 
         self.cut_table = CutListTable()
-        layout.addWidget(self.cut_table, 1)
+        self.cut_table.setMinimumHeight(280)
+        self.cut_table.itemSelectionChanged.connect(self.preview_selected_cut_range)
+        cut_layout.addWidget(self.cut_table, 1)
+
+        content_layout.addWidget(cut_panel, 0)
+        bottom_safe_space = QWidget()
+        bottom_safe_space.setFixedHeight(96)
+        content_layout.addWidget(bottom_safe_space, 0)
         return page
 
     def _build_rough_cut_tab(self) -> QWidget:
@@ -645,12 +905,27 @@ class MainWindow(QMainWindow):
             self._show_warning("Project name cannot be empty.")
             return
 
+        default_path = self.project_manager.projects_root / f"{self._safe_project_filename(name)}{PROJECT_EXTENSION}"
+        project_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save New StoryCut Project",
+            str(default_path),
+            f"StoryCut Project (*{PROJECT_EXTENSION});;JSON Files (*.json);;All Files (*)",
+        )
+        if not project_file:
+            return
+
         try:
-            data = self.project_manager.create_project(name)
+            data = self.project_manager.create_project_at(name, project_file)
             self._load_project_data(data)
-            self._log(f"Created project: {data.name}")
+            self._log(f"Created project: {data.name} at {data.project_file}")
         except Exception as exc:
             self._show_error(str(exc))
+
+    def _safe_project_filename(self, name: str) -> str:
+        clean = "".join(char if char.isalnum() or char in " ._-" else "_" for char in name.strip())
+        clean = "_".join(clean.split()).strip("._- ")
+        return clean or "StoryCut_Project"
 
     def load_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -666,6 +941,29 @@ class MainWindow(QMainWindow):
             data = self.project_manager.load_project(path)
             self._load_project_data(data)
             self._log(f"Loaded project: {data.name}")
+        except Exception as exc:
+            self._show_error(str(exc))
+
+    def refresh_project(self) -> None:
+        if not self._require_project():
+            return
+        if self._busy_count > 0:
+            self._show_warning("Wait for the current task to finish before refreshing the project.")
+            return
+
+        assert self.project is not None
+        project_file = Path(self.project.project_file)
+        if not project_file.exists():
+            self._show_warning(f"Project file was not found:\n{project_file}")
+            return
+
+        try:
+            current_tab = self.tabs.currentIndex()
+            data = self.project_manager.load_project(project_file)
+            self._load_project_data(data)
+            self.tabs.setCurrentIndex(min(current_tab, self.tabs.count() - 1))
+            self._log(f"Refreshed project from disk: {project_file}")
+            self.statusBar().showMessage("Project refreshed", 4000)
         except Exception as exc:
             self._show_error(str(exc))
 
@@ -698,6 +996,9 @@ class MainWindow(QMainWindow):
 
         assert self.project is not None
         self.project.video_path = path
+        self.project.metadata = None
+        self.metadata_view.setText(metadata_to_text(None))
+        self._refresh_visual_editor_video(0.0)
         self._log(f"Imported video: {path}")
         self.save_project()
         self.read_metadata()
@@ -717,6 +1018,7 @@ class MainWindow(QMainWindow):
             assert self.project is not None
             self.project.set_metadata(metadata)
             self.metadata_view.setText(metadata_to_text(metadata))
+            self._refresh_visual_editor_video(metadata.duration)
             self._log("Metadata loaded.")
             if not metadata.has_audio:
                 self._show_warning("No audio stream was detected in this video.")
@@ -1068,6 +1370,55 @@ class MainWindow(QMainWindow):
         self.cut_table.set_cut_items(existing + new_items)
         self._log(f"Added {len(new_items)} segment(s) to the cut list.")
         self.save_project()
+
+    def add_visual_cut_to_list(self, start: float, end: float, text: str) -> None:
+        if not self._require_video():
+            return
+        if end <= start:
+            self._show_warning("End time must be after start time.")
+            return
+
+        existing = self.cut_table.to_cut_items()
+        item = {
+            "id": f"clip_{len(existing) + 1:03d}_{uuid.uuid4().hex[:6]}",
+            "start": format_duration(start),
+            "end": format_duration(end),
+            "text": text,
+        }
+        self.cut_table.set_cut_items(existing + [item])
+        self.cut_table.selectRow(self.cut_table.rowCount() - 1)
+        self._log(f"Added visual cut: {item['start']} to {item['end']}.")
+        self.save_project()
+
+    def apply_visual_range_to_selected_cut(self, start: float, end: float) -> None:
+        if not self._require_project():
+            return
+        if end <= start:
+            self._show_warning("End time must be after start time.")
+            return
+
+        updated = self.cut_table.update_first_selected_range(start, end)
+        if not updated:
+            self._show_warning("Select one cut list row first.")
+            return
+
+        self._log(f"Updated {updated.get('id', 'clip')} range: {updated['start']} to {updated['end']}.")
+        self.save_project()
+
+    def preview_selected_cut_range(self) -> None:
+        if not getattr(self, "visual_cut_editor", None):
+            return
+
+        selected = self.cut_table.selected_cut_items()
+        if not selected:
+            return
+
+        try:
+            clip = ClipItem.from_dict(selected[0])
+        except (TypeError, ValueError):
+            return
+
+        self.visual_cut_editor.set_clip_range(clip.start, clip.end, seek=True)
 
     def remove_selected_cuts(self) -> None:
         removed = self.cut_table.remove_selected_rows()
@@ -1496,6 +1847,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error(str(exc))
 
+    def _refresh_visual_editor_video(self, duration_seconds: float | None = None) -> None:
+        if not getattr(self, "visual_cut_editor", None):
+            return
+
+        if not self.project or not self.project.video_path:
+            self.visual_cut_editor.set_video("", 0.0)
+            return
+
+        duration = duration_seconds
+        if duration is None and self.project.metadata:
+            duration = VideoMetadata.from_dict(self.project.metadata).duration
+        self.visual_cut_editor.set_video(self.project.video_path, duration or 0.0)
+
     def _load_project_data(self, data: ProjectData) -> None:
         self.project = data
         Path(data.project_dir).mkdir(parents=True, exist_ok=True)
@@ -1507,6 +1871,7 @@ class MainWindow(QMainWindow):
 
         metadata = VideoMetadata.from_dict(data.metadata) if data.metadata else None
         self.metadata_view.setText(metadata_to_text(metadata))
+        self._refresh_visual_editor_video(metadata.duration if metadata else None)
         self.scene_table.set_scene_notes(data.scene_notes)
         self.cut_table.set_cut_items(data.cut_list)
         self.checklist_widget.set_states(data.checklist)
