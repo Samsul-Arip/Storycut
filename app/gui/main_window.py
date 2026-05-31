@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QSizePolicy,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -38,7 +40,13 @@ from PyQt6.QtWidgets import (
 )
 
 from app.core.audio_utils import extract_audio
-from app.core.cutter import ClipItem, export_clips, export_timeline_video, extract_clip_thumbnail
+from app.core.cutter import (
+    ClipItem,
+    export_clips,
+    export_timeline_video,
+    extract_clip_thumbnail,
+    extract_video_frame,
+)
 from app.core.database import TranscriptDatabase
 from app.core.montage import (
     ROUGH_CUT_COLOR_GRADES,
@@ -77,6 +85,7 @@ from app.gui.widgets import (
     SceneNotesTable,
     TimelineClipTable,
     TranscriptTable,
+    VideoPreviewPanel,
     VideoCutEditorWidget,
 )
 
@@ -227,6 +236,7 @@ class MainWindow(QMainWindow):
             self.ocr_subtitle_button,
             self.export_button,
             self.export_manual_clips_button,
+            self.preview_all_timeline_button,
             self.build_timeline_rough_cut_button,
             self.build_rough_timeline_button,
             self.export_rough_cut_button,
@@ -660,77 +670,115 @@ class MainWindow(QMainWindow):
         page_layout.addWidget(scroll_area, 1)
 
         content = QWidget()
-        content.setMinimumHeight(1040)
+        content.setMinimumHeight(2300)
         scroll_area.setWidget(content)
 
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(10, 10, 10, 28)
+        layout.setContentsMargins(10, 10, 26, 28)
         layout.setSpacing(8)
 
         video_ori_group = QGroupBox("Video Ori Preview")
-        video_ori_group.setMinimumHeight(610)
+        video_ori_group.setMinimumHeight(690)
         video_ori_layout = QVBoxLayout(video_ori_group)
         video_ori_layout.setContentsMargins(10, 18, 10, 10)
         video_ori_layout.setSpacing(8)
         self.visual_cut_editor = VideoCutEditorWidget()
-        self.visual_cut_editor.setMinimumHeight(570)
-        self.visual_cut_editor.video_widget.setMinimumHeight(330)
-        self.visual_cut_editor.video_widget.setMaximumHeight(380)
+        self.visual_cut_editor.setMinimumHeight(650)
+        self.visual_cut_editor.video_widget.setMinimumHeight(300)
+        self.visual_cut_editor.video_widget.setMaximumHeight(360)
         self.visual_cut_editor.add_clip_button.setText("Save Manual Clip")
+        self.visual_cut_editor.add_photo_button.setText("Save Photo")
         self.visual_cut_editor.apply_clip_button.setText("Update Manual")
         self.visual_cut_editor.addClipRequested.connect(self.add_visual_cut_to_list)
+        self.visual_cut_editor.addPhotoRequested.connect(self.add_visual_photo_to_list)
         self.visual_cut_editor.updateClipRequested.connect(self.apply_visual_range_to_selected_cut)
         video_ori_layout.addWidget(self.visual_cut_editor, 1)
         layout.addWidget(video_ori_group, 0)
 
         editor_split = QSplitter(Qt.Orientation.Horizontal)
         editor_split.setChildrenCollapsible(False)
-        editor_split.setMinimumHeight(380)
+        editor_split.setMinimumHeight(1380)
+        editor_split.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.MinimumExpanding,
+        )
 
         manual_panel = QGroupBox("Manual Clips")
+        manual_panel.setMinimumHeight(1360)
+        manual_panel.setMinimumWidth(520)
         manual_layout = QVBoxLayout(manual_panel)
         manual_layout.setContentsMargins(10, 18, 10, 10)
         manual_layout.setSpacing(8)
-        manual_toolbar = QHBoxLayout()
-        self.add_manual_to_timeline_button = QPushButton("Add to Timeline")
-        self.remove_cut_button = QPushButton("Remove Manual")
-        self.export_manual_clips_button = QPushButton("Export Manual Clips")
+        manual_toolbar = QVBoxLayout()
+        manual_toolbar.setContentsMargins(0, 0, 0, 0)
+        manual_toolbar.setSpacing(6)
+        manual_add_toolbar = QHBoxLayout()
+        manual_add_toolbar.setContentsMargins(0, 0, 0, 0)
+        manual_add_toolbar.setSpacing(6)
+        manual_edit_toolbar = QHBoxLayout()
+        manual_edit_toolbar.setContentsMargins(0, 0, 0, 0)
+        manual_edit_toolbar.setSpacing(6)
+        self.add_manual_to_timeline_button = QPushButton("Add Selected")
+        self.add_manual_to_timeline_button.setToolTip("Add selected Manual Clips to Main Timeline")
+        self.add_all_manual_to_timeline_button = QPushButton("Add All")
+        self.add_all_manual_to_timeline_button.setToolTip("Add all Manual Clips to Main Timeline")
+        self.remove_cut_button = QPushButton("Remove")
+        self.remove_cut_button.setToolTip("Remove selected Manual Clips")
+        self.export_manual_clips_button = QPushButton("Export Clips")
+        self.export_manual_clips_button.setToolTip("Export selected Manual Clips")
         self.add_manual_to_timeline_button.clicked.connect(self.add_selected_manual_clips_to_timeline)
+        self.add_all_manual_to_timeline_button.clicked.connect(self.add_all_manual_clips_to_timeline)
         self.remove_cut_button.clicked.connect(self.remove_selected_cuts)
         self.export_manual_clips_button.clicked.connect(self.export_selected_clips)
-        manual_toolbar.addWidget(self.add_manual_to_timeline_button)
-        manual_toolbar.addWidget(self.remove_cut_button)
-        manual_toolbar.addStretch(1)
-        manual_toolbar.addWidget(self.export_manual_clips_button)
+        manual_add_toolbar.addWidget(self.add_manual_to_timeline_button)
+        manual_add_toolbar.addWidget(self.add_all_manual_to_timeline_button)
+        manual_add_toolbar.addStretch(1)
+        manual_edit_toolbar.addWidget(self.remove_cut_button)
+        manual_edit_toolbar.addStretch(1)
+        manual_edit_toolbar.addWidget(self.export_manual_clips_button)
+        manual_toolbar.addLayout(manual_add_toolbar)
+        manual_toolbar.addLayout(manual_edit_toolbar)
         manual_layout.addLayout(manual_toolbar)
         self.cut_table = ManualClipTable()
-        self.cut_table.setMinimumWidth(360)
+        self.cut_table.setMinimumWidth(500)
         self.cut_table.itemSelectionChanged.connect(self.preview_selected_cut_range)
         self.cut_table.itemChanged.connect(self._on_editor_manual_changed)
+        self.cut_table.itemDoubleClicked.connect(self.add_manual_clip_from_double_click)
         manual_layout.addWidget(self.cut_table, 1)
 
         timeline_panel = QGroupBox("Main Timeline - Rough Cut")
+        timeline_panel.setMinimumHeight(1360)
         timeline_layout = QVBoxLayout(timeline_panel)
         timeline_layout.setContentsMargins(10, 18, 10, 10)
         timeline_layout.setSpacing(8)
 
-        timeline_toolbar = QHBoxLayout()
-        self.build_timeline_rough_cut_button = QPushButton("Build Rough Cut Timeline")
-        self.preview_timeline_clip_button = QPushButton("Preview Selected")
-        self.trim_timeline_clip_button = QPushButton("Trim to Video Ori Selection")
+        timeline_toolbar = QVBoxLayout()
+        timeline_toolbar.setContentsMargins(0, 0, 0, 0)
+        timeline_toolbar.setSpacing(6)
+        timeline_primary_toolbar = QHBoxLayout()
+        timeline_primary_toolbar.setContentsMargins(0, 0, 0, 0)
+        timeline_primary_toolbar.setSpacing(6)
+        timeline_edit_toolbar = QHBoxLayout()
+        timeline_edit_toolbar.setContentsMargins(0, 0, 0, 0)
+        timeline_edit_toolbar.setSpacing(6)
+        self.build_timeline_rough_cut_button = QPushButton("Build")
+        self.build_timeline_rough_cut_button.setToolTip("Build Rough Cut Timeline")
+        self.preview_all_timeline_button = QPushButton("Preview All")
+        self.preview_all_timeline_button.setToolTip("Preview all clips in Main Timeline")
+        self.trim_timeline_clip_button = QPushButton("Trim")
+        self.trim_timeline_clip_button.setToolTip("Trim selected timeline clip to Video Ori selection")
         self.split_timeline_clip_button = QPushButton("Split")
-        self.delete_timeline_clip_button = QPushButton("Delete")
         self.timeline_zoom_out_button = QPushButton("Zoom -")
         self.timeline_zoom_in_button = QPushButton("Zoom +")
         self.undo_editor_button = QPushButton("Undo")
         self.redo_editor_button = QPushButton("Redo")
-        self.export_button = QPushButton("Export Video")
+        self.export_button = QPushButton("Export")
+        self.export_button.setToolTip("Export full Main Timeline video")
         self.export_button.setObjectName("PrimaryButton")
         self.build_timeline_rough_cut_button.clicked.connect(self.build_rough_cut_timeline)
-        self.preview_timeline_clip_button.clicked.connect(self.preview_selected_timeline_clip)
+        self.preview_all_timeline_button.clicked.connect(self.preview_full_timeline_video)
         self.trim_timeline_clip_button.clicked.connect(self.trim_selected_timeline_to_video_ori_selection)
         self.split_timeline_clip_button.clicked.connect(self.split_selected_timeline_clip)
-        self.delete_timeline_clip_button.clicked.connect(self.delete_selected_timeline_clips)
         self.timeline_zoom_out_button.clicked.connect(lambda: self.adjust_timeline_zoom(-0.2))
         self.timeline_zoom_in_button.clicked.connect(lambda: self.adjust_timeline_zoom(0.2))
         self.undo_editor_button.clicked.connect(self.undo_editor_change)
@@ -738,24 +786,38 @@ class MainWindow(QMainWindow):
         self.export_button.clicked.connect(self.export_final_video)
         for button in (
             self.build_timeline_rough_cut_button,
-            self.preview_timeline_clip_button,
+            self.preview_all_timeline_button,
             self.trim_timeline_clip_button,
+        ):
+            timeline_primary_toolbar.addWidget(button)
+        timeline_primary_toolbar.addStretch(1)
+        timeline_primary_toolbar.addWidget(self.export_button)
+        for button in (
             self.split_timeline_clip_button,
-            self.delete_timeline_clip_button,
             self.timeline_zoom_out_button,
             self.timeline_zoom_in_button,
             self.undo_editor_button,
             self.redo_editor_button,
         ):
-            timeline_toolbar.addWidget(button)
-        timeline_toolbar.addStretch(1)
-        timeline_toolbar.addWidget(self.export_button)
+            timeline_edit_toolbar.addWidget(button)
+        timeline_edit_toolbar.addStretch(1)
+        timeline_toolbar.addLayout(timeline_primary_toolbar)
+        timeline_toolbar.addLayout(timeline_edit_toolbar)
         timeline_layout.addLayout(timeline_toolbar)
 
         export_row = QWidget()
-        export_layout = QHBoxLayout(export_row)
+        export_layout = QVBoxLayout(export_row)
         export_layout.setContentsMargins(0, 0, 0, 0)
-        export_layout.setSpacing(8)
+        export_layout.setSpacing(6)
+        export_format_layout = QHBoxLayout()
+        export_format_layout.setContentsMargins(0, 0, 0, 0)
+        export_format_layout.setSpacing(8)
+        export_quality_layout = QHBoxLayout()
+        export_quality_layout.setContentsMargins(0, 0, 0, 0)
+        export_quality_layout.setSpacing(8)
+        export_output_layout = QHBoxLayout()
+        export_output_layout.setContentsMargins(0, 0, 0, 0)
+        export_output_layout.setSpacing(8)
         self.export_resolution_combo = QComboBox()
         self.export_resolution_combo.addItems(["1280x720", "1920x1080", "854x480", "Original"])
         self.export_fps_spin = QDoubleSpinBox()
@@ -772,27 +834,44 @@ class MainWindow(QMainWindow):
         self.export_output_browse_button.clicked.connect(self.choose_export_output_file)
         self.timeline_total_label = QLabel("Timeline total: 00:00.000")
         self.timeline_total_label.setMinimumWidth(190)
-        export_layout.addWidget(QLabel("Resolution"))
-        export_layout.addWidget(self.export_resolution_combo)
-        export_layout.addWidget(QLabel("FPS"))
-        export_layout.addWidget(self.export_fps_spin)
-        export_layout.addWidget(QLabel("Bitrate"))
-        export_layout.addWidget(self.export_bitrate_input)
-        export_layout.addWidget(QLabel("Output"))
-        export_layout.addWidget(self.export_output_input, 1)
-        export_layout.addWidget(self.export_output_browse_button)
-        export_layout.addWidget(self.timeline_total_label)
+        export_format_layout.addWidget(QLabel("Resolution"))
+        export_format_layout.addWidget(self.export_resolution_combo)
+        export_format_layout.addWidget(QLabel("FPS"))
+        export_format_layout.addWidget(self.export_fps_spin)
+        export_format_layout.addStretch(1)
+        export_quality_layout.addWidget(QLabel("Bitrate"))
+        export_quality_layout.addWidget(self.export_bitrate_input)
+        export_quality_layout.addStretch(1)
+        export_quality_layout.addWidget(self.timeline_total_label)
+        export_output_layout.addWidget(QLabel("Output"))
+        export_output_layout.addWidget(self.export_output_input, 1)
+        export_output_layout.addWidget(self.export_output_browse_button)
+        export_layout.addLayout(export_format_layout)
+        export_layout.addLayout(export_quality_layout)
+        export_layout.addLayout(export_output_layout)
         timeline_layout.addWidget(export_row, 0)
 
+        self.timeline_preview_panel = VideoPreviewPanel("Main Timeline Preview")
+        self.timeline_preview_panel.setMinimumHeight(650)
+        self.timeline_preview_panel.video_widget.setMinimumHeight(450)
+        self.timeline_preview_panel.video_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        timeline_layout.addWidget(self.timeline_preview_panel, 0)
+        timeline_layout.addSpacing(42)
+
         self.timeline_table = TimelineClipTable()
-        self.timeline_table.setMinimumHeight(260)
+        self.timeline_table.setMinimumHeight(340)
+        self.timeline_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.timeline_table.customContextMenuRequested.connect(self.show_timeline_context_menu)
         self.timeline_table.timelineChanged.connect(self._on_editor_timeline_changed)
         self.timeline_table.clipActivated.connect(self.preview_timeline_clip)
         timeline_layout.addWidget(self.timeline_table, 1)
 
         editor_split.addWidget(manual_panel)
         editor_split.addWidget(timeline_panel)
-        editor_split.setSizes([430, 900])
+        editor_split.setSizes([560, 760])
         layout.addWidget(editor_split, 2)
         return page
 
@@ -1329,6 +1408,7 @@ class MainWindow(QMainWindow):
         self.project.cut_list = []
         self.cut_table.set_cut_items([])
         self.timeline_table.set_timeline_clips([])
+        self.timeline_preview_panel.set_video("", 0.0)
         self._reset_editor_history()
         self.metadata_view.setText(metadata_to_text(None))
         self._refresh_visual_editor_video(0.0)
@@ -1732,6 +1812,40 @@ class MainWindow(QMainWindow):
         self._push_editor_history()
         self.save_project()
 
+    def add_visual_photo_to_list(self, timestamp: float) -> None:
+        if not self._require_video():
+            return
+
+        assert self.project is not None
+        timestamp = max(0.0, float(timestamp or 0.0))
+        existing = self.cut_table.to_cut_items()
+        photo_id = f"photo_{len(existing) + 1:03d}_{uuid.uuid4().hex[:6]}"
+        photo_dir = Path(self.project.project_dir) / "photos"
+        photo_path = photo_dir / f"{self._safe_project_filename(photo_id)}.jpg"
+        try:
+            extract_video_frame(self.project.video_path, photo_path, timestamp)
+        except Exception as exc:
+            self._show_error(f"Could not save photo frame: {exc}")
+            return
+
+        item = {
+            "id": photo_id,
+            "start": format_duration(timestamp),
+            "end": format_duration(timestamp + 0.1),
+            "timestamp": round(timestamp, 3),
+            "output_duration": 3.0,
+            "text": f"Photo frame {format_duration(timestamp)}",
+            "kind": "photo",
+            "media_type": "photo",
+            "image_path": str(photo_path),
+            "thumbnail_path": str(photo_path),
+        }
+        self.cut_table.set_cut_items(existing + [item])
+        self.cut_table.selectRow(self.cut_table.rowCount() - 1)
+        self._log(f"Saved Photo to Manual Clips: {format_duration(timestamp)}.")
+        self._push_editor_history()
+        self.save_project()
+
     def apply_visual_range_to_selected_cut(self, start: float, end: float) -> None:
         if not self._require_project():
             return
@@ -1835,9 +1949,28 @@ class MainWindow(QMainWindow):
         if not selected:
             self._show_warning("Select one or more Manual Clips first.")
             return
-        self.timeline_table.append_clips(selected)
-        self._log(f"Added {len(selected)} Manual Clip(s) to the timeline.")
+        insert_at = self.timeline_table.insertion_row_after_selection()
+        self.timeline_table.append_clips(selected, insert_at=insert_at)
+        self._log(f"Added {len(selected)} Manual Clip(s) at Main Timeline row {insert_at + 1}.")
         self.save_project()
+
+    def add_all_manual_clips_to_timeline(self) -> None:
+        if not self._require_project():
+            return
+        clips = self.cut_table.to_cut_items()
+        if not clips:
+            self._show_warning("No Manual Clips are available yet.")
+            return
+        insert_at = self.timeline_table.insertion_row_after_selection()
+        self.timeline_table.append_clips(clips, insert_at=insert_at)
+        self._log(f"Added all {len(clips)} Manual Clip(s) at Main Timeline row {insert_at + 1}.")
+        self.save_project()
+
+    def add_manual_clip_from_double_click(self, item: QTableWidgetItem) -> None:
+        if item.column() == 3:
+            return
+        self.cut_table.selectRow(item.row())
+        self.add_selected_manual_clips_to_timeline()
 
     def preview_timeline_clip(self, clip: dict[str, Any]) -> None:
         if not self.project or not self.project.video_path:
@@ -1855,7 +1988,105 @@ class MainWindow(QMainWindow):
         if not clip:
             self._show_warning("Select one timeline clip first.")
             return
-        self.preview_timeline_clip(clip)
+        self.preview_timeline_clip_in_main_preview(clip)
+
+    def preview_timeline_clip_in_main_preview(self, clip: dict[str, Any]) -> None:
+        if not self._require_video():
+            return
+
+        timeline = self._timeline_with_output_durations([clip])
+        if not timeline:
+            self._show_warning("Selected timeline clip cannot be previewed.")
+            return
+
+        assert self.project is not None
+        preview_clips: list[dict[str, float]] = []
+        for timeline_clip in timeline:
+            try:
+                item = ClipItem.from_dict(timeline_clip)
+            except (TypeError, ValueError):
+                continue
+            output_duration = self._clip_output_duration(timeline_clip)
+            if output_duration <= 0:
+                output_duration = max(0.1, item.end - item.start)
+            preview_clips.append(
+                {
+                    "start": item.start,
+                    "end": item.end,
+                    "output_duration": output_duration,
+                }
+            )
+        if not preview_clips:
+            self._show_warning("Selected timeline clip has no valid preview range.")
+            return
+
+        source_duration = 0.0
+        if self.project.metadata:
+            source_duration = VideoMetadata.from_dict(self.project.metadata).duration
+
+        self.timeline_preview_panel.set_timeline_sequence(
+            self.project.video_path,
+            preview_clips,
+            source_duration_seconds=source_duration,
+            autoplay=True,
+        )
+        total_duration = self._timeline_total_duration(timeline)
+        clip_id = str(timeline[0].get("id") or "selected clip")
+        self._log(
+            f"Previewing selected Main Timeline clip without saving a preview file: "
+            f"{clip_id}, {format_duration(total_duration)}."
+        )
+        self.statusBar().showMessage("Selected Main Timeline clip preview playing", 4000)
+
+    def preview_full_timeline_video(self) -> None:
+        if not self._require_video():
+            return
+
+        timeline = self._timeline_with_output_durations(self.timeline_table.timeline_clips())
+        if not timeline:
+            self._show_warning("Timeline is empty. Build a rough cut or drag Manual Clips into it first.")
+            return
+        self.timeline_table.set_timeline_clips(timeline)
+        self._refresh_timeline_total_label()
+        total_duration = self._timeline_total_duration(timeline)
+        total_clips = len(timeline)
+
+        assert self.project is not None
+        preview_clips: list[dict[str, float]] = []
+        for clip in timeline:
+            try:
+                item = ClipItem.from_dict(clip)
+            except (TypeError, ValueError):
+                continue
+            output_duration = self._clip_output_duration(clip)
+            if output_duration <= 0:
+                output_duration = max(0.1, item.end - item.start)
+            preview_clips.append(
+                {
+                    "start": item.start,
+                    "end": item.end,
+                    "output_duration": output_duration,
+                }
+            )
+        if not preview_clips:
+            self._show_warning("Timeline preview could not find any valid clip ranges.")
+            return
+
+        source_duration = 0.0
+        if self.project.metadata:
+            source_duration = VideoMetadata.from_dict(self.project.metadata).duration
+
+        self.timeline_preview_panel.set_timeline_sequence(
+            self.project.video_path,
+            preview_clips,
+            source_duration_seconds=source_duration,
+            autoplay=True,
+        )
+        self._log(
+            f"Previewing full Main Timeline without saving a preview file: "
+            f"{total_clips} clip(s), {format_duration(total_duration)}."
+        )
+        self.statusBar().showMessage("Main Timeline preview playing without local preview file", 4000)
 
     def trim_selected_timeline_to_video_ori_selection(self) -> None:
         if not self._require_project():
@@ -1884,6 +2115,184 @@ class MainWindow(QMainWindow):
             self._show_warning("Select one or more timeline clips first.")
             return
         self._log(f"Deleted {removed} timeline clip(s).")
+        self.save_project()
+
+    def show_timeline_context_menu(self, position: Any) -> None:
+        index = self.timeline_table.indexAt(position)
+        selected_rows = {row.row() for row in self.timeline_table.selectionModel().selectedRows()}
+        if index.isValid() and index.row() not in selected_rows:
+            self.timeline_table.selectRow(index.row())
+            selected_rows = {index.row()}
+        if not selected_rows:
+            return
+
+        menu = QMenu(self)
+        context_clip = None
+        if index.isValid():
+            clips = self.timeline_table.timeline_clips()
+            if 0 <= index.row() < len(clips):
+                context_clip = clips[index.row()]
+
+        preview_action = menu.addAction("Preview This Item")
+        effects_action = menu.addAction("Edit Zoom-In / Slowmo...")
+        clear_effects_action = menu.addAction("Clear Zoom / Slowmo")
+        menu.addSeparator()
+        move_to_row_action = menu.addAction("Move to Row...")
+        move_top_action = menu.addAction("Move to Top")
+        move_up_action = menu.addAction("Move Up")
+        move_down_action = menu.addAction("Move Down")
+        move_bottom_action = menu.addAction("Move to Bottom")
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete")
+
+        chosen = menu.exec(self.timeline_table.viewport().mapToGlobal(position))
+        if chosen == preview_action:
+            if context_clip:
+                self.preview_timeline_clip_in_main_preview(context_clip)
+            else:
+                self.preview_selected_timeline_clip()
+        elif chosen == effects_action:
+            self.edit_selected_timeline_clip_effects()
+        elif chosen == clear_effects_action:
+            self.clear_selected_timeline_clip_effects()
+        elif chosen == move_to_row_action:
+            self.move_selected_timeline_clips_to_row()
+        elif chosen == move_top_action:
+            self.move_selected_timeline_clips("top")
+        elif chosen == move_up_action:
+            self.move_selected_timeline_clips("up")
+        elif chosen == move_down_action:
+            self.move_selected_timeline_clips("down")
+        elif chosen == move_bottom_action:
+            self.move_selected_timeline_clips("bottom")
+        elif chosen == delete_action:
+            self.delete_selected_timeline_clips()
+
+    def edit_selected_timeline_clip_effects(self) -> None:
+        selected = self.timeline_table.selected_timeline_clip()
+        if not selected:
+            self._show_warning("Select one or more Main Timeline clips first.")
+            return
+
+        timeline = self.timeline_table.timeline_clips()
+        selected_rows = sorted({row.row() for row in self.timeline_table.selectionModel().selectedRows()})
+        selected_clips = [timeline[row] for row in selected_rows if 0 <= row < len(timeline)]
+        photo_clips = [clip for clip in selected_clips if self._is_photo_clip(clip)]
+        has_photo = bool(photo_clips)
+        has_video = any(not self._is_photo_clip(clip) for clip in selected_clips)
+        default_photo_duration = self._clip_output_duration(photo_clips[0]) if photo_clips else 3.0
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Clip Effects")
+        layout = QFormLayout(dialog)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        zoom_spin = QDoubleSpinBox()
+        zoom_spin.setRange(100.0, 300.0)
+        zoom_spin.setDecimals(0)
+        zoom_spin.setSingleStep(5.0)
+        zoom_spin.setSuffix(" %")
+        zoom_spin.setValue(float(selected.get("zoom_percent", 100.0) or 100.0))
+
+        slowmo_spin = QDoubleSpinBox()
+        slowmo_spin.setRange(1.0, 4.0)
+        slowmo_spin.setDecimals(2)
+        slowmo_spin.setSingleStep(0.1)
+        slowmo_spin.setSuffix("x")
+        slowmo_spin.setValue(float(selected.get("slowmo_factor", 1.0) or 1.0))
+        slowmo_spin.setEnabled(has_video)
+        slowmo_spin.setToolTip("Slowmo hanya berlaku untuk clip video; photo tetap berupa still frame.")
+
+        photo_duration_spin = QDoubleSpinBox()
+        photo_duration_spin.setRange(0.1, 60.0)
+        photo_duration_spin.setDecimals(2)
+        photo_duration_spin.setSingleStep(0.25)
+        photo_duration_spin.setSuffix(" sec")
+        photo_duration_spin.setValue(max(0.1, default_photo_duration or 3.0))
+        photo_duration_spin.setToolTip("Durasi still photo di Main Timeline.")
+
+        layout.addRow("Zoom akhir", zoom_spin)
+        layout.addRow("Slowmo", slowmo_spin)
+        if has_photo:
+            layout.addRow("Durasi photo", photo_duration_spin)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        changed = self.timeline_table.apply_effects_to_selected(
+            zoom_spin.value(),
+            slowmo_spin.value() if has_video else 1.0,
+            photo_duration_spin.value() if has_photo else None,
+        )
+        if not changed:
+            self._show_warning("Select one or more Main Timeline clips first.")
+            return
+        self._log(
+            f"Applied clip effects: zoom-in 100% -> {zoom_spin.value():.0f}%"
+            + (f", slowmo {slowmo_spin.value():.2f}x" if has_video else "")
+            + (f", photo {photo_duration_spin.value():.2f}s" if has_photo else "")
+            + f" to {changed} timeline clip(s)."
+        )
+        self.save_project()
+
+    def clear_selected_timeline_clip_effects(self) -> None:
+        changed = self.timeline_table.apply_effects_to_selected(100.0, 1.0)
+        if not changed:
+            self._show_warning("Select one or more Main Timeline clips first.")
+            return
+        self._log(f"Cleared zoom/slowmo effects from {changed} timeline clip(s).")
+        self.save_project()
+
+    def move_selected_timeline_clips_to_row(self) -> None:
+        selected_rows = sorted({row.row() for row in self.timeline_table.selectionModel().selectedRows()})
+        if not selected_rows:
+            self._show_warning("Select one or more Main Timeline clips first.")
+            return
+        row_count = self.timeline_table.rowCount()
+        if row_count <= 0:
+            self._show_warning("Main Timeline is empty.")
+            return
+
+        target_row, accepted = QInputDialog.getInt(
+            self,
+            "Move to Row",
+            f"Move selected clip(s) to row number 1 - {row_count}:",
+            selected_rows[0] + 1,
+            1,
+            row_count,
+            1,
+        )
+        if not accepted:
+            return
+        if not self.timeline_table.move_selected_rows_to_position(target_row):
+            self.statusBar().showMessage("Selected clip(s) are already at that position", 2500)
+            return
+        self._log(f"Moved selected Main Timeline clip(s) to row {target_row}.")
+        self.save_project()
+
+    def move_selected_timeline_clips(self, target: str) -> None:
+        actions = {
+            "top": (lambda: self.timeline_table.move_selected_rows_to_edge(top=True), "to the top"),
+            "up": (lambda: self.timeline_table.move_selected_rows(-1), "up"),
+            "down": (lambda: self.timeline_table.move_selected_rows(1), "down"),
+            "bottom": (lambda: self.timeline_table.move_selected_rows_to_edge(top=False), "to the bottom"),
+        }
+        action = actions.get(target)
+        if not action:
+            return
+        moved, label = action[0](), action[1]
+        if not moved:
+            self._show_warning(
+                "Select one or more Main Timeline clips, or choose clips that are not already at that position."
+            )
+            return
+        self._log(f"Moved selected Main Timeline clip(s) {label}.")
         self.save_project()
 
     def adjust_timeline_zoom(self, delta: float) -> None:
@@ -2078,6 +2487,8 @@ class MainWindow(QMainWindow):
         )
 
     def _clip_source_duration(self, clip: dict[str, Any]) -> float:
+        if self._is_photo_clip(clip):
+            return self._clip_output_duration(clip) or 3.0
         try:
             item = ClipItem.from_dict(clip)
             return max(0.0, item.end - item.start)
@@ -2092,7 +2503,19 @@ class MainWindow(QMainWindow):
                 value = 0.0
             if value > 0:
                 return value
+        if self._is_photo_clip(clip):
+            return 3.0
+        try:
+            slowmo = float(clip.get("slowmo_factor", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            slowmo = 1.0
+        if slowmo > 1.0:
+            return self._clip_source_duration(clip) * slowmo
         return 0.0
+
+    def _is_photo_clip(self, clip: dict[str, Any]) -> bool:
+        kind = str(clip.get("media_type") or clip.get("kind") or "").strip().lower()
+        return kind in {"photo", "still", "image"} or bool(clip.get("image_path"))
 
     def _export_settings_dict(self) -> dict[str, Any]:
         return {
@@ -2771,6 +3194,7 @@ class MainWindow(QMainWindow):
         Path(data.project_dir).mkdir(parents=True, exist_ok=True)
         Path(data.project_dir, "audio").mkdir(exist_ok=True)
         Path(data.project_dir, "clips").mkdir(exist_ok=True)
+        Path(data.project_dir, "photos").mkdir(exist_ok=True)
         Path(data.project_dir, "scene_frames").mkdir(exist_ok=True)
         Path(data.project_dir, "rough_cuts").mkdir(exist_ok=True)
         Path(data.project_dir, "exports").mkdir(exist_ok=True)
@@ -2784,6 +3208,7 @@ class MainWindow(QMainWindow):
         self.scene_table.set_scene_notes(data.scene_notes)
         self.cut_table.set_cut_items(data.manual_clips or data.cut_list)
         self.timeline_table.set_timeline_clips(data.timeline_clips)
+        self.timeline_preview_panel.set_video("", 0.0)
         self._refresh_timeline_total_label()
         self.checklist_widget.set_states(data.checklist)
         self.script_edit.setPlainText(data.script_text)

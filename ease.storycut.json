@@ -1,0 +1,134 @@
+{
+  "name": "Ease",
+  "project_dir": "D:\\Project\\Tools Editing\\storycut_ai",
+  "database_path": ":memory:",
+  "project_file": "D:\\Project\\Tools Editing\\storycut_ai\\ease.storycut.json",
+  "video_path": "",
+  "audio_path": "",
+  "metadata": null,
+  "cut_list": [
+    {
+      "end": "00:02.000",
+      "id": "manual_001",
+      "start": "00:01.000",
+      "text": "one"
+    },
+    {
+      "end": "00:04.000",
+      "id": "manual_002",
+      "start": "00:03.000",
+      "text": "two"
+    }
+  ],
+  "manual_clips": [
+    {
+      "end": "00:02.000",
+      "id": "manual_001",
+      "start": "00:01.000",
+      "text": "one"
+    },
+    {
+      "end": "00:04.000",
+      "id": "manual_002",
+      "start": "00:03.000",
+      "text": "two"
+    }
+  ],
+  "timeline_clips": [
+    {
+      "end": "00:02.000",
+      "id": "manual_001_tl_155715806312_1",
+      "kind": "manual",
+      "output_duration": 1.0,
+      "source_clip_id": "manual_001",
+      "start": "00:01.000",
+      "text": "one"
+    }
+  ],
+  "checklist": [
+    {
+      "text": "I am adding original commentary, criticism, analysis, or explanation.",
+      "checked": false
+    },
+    {
+      "text": "I am using only the clips needed to support the review or storytelling point.",
+      "checked": false
+    },
+    {
+      "text": "No Video Ori clip is longer than five seconds.",
+      "checked": false
+    },
+    {
+      "text": "I am not presenting long uninterrupted portions as a substitute for the original work.",
+      "checked": false
+    },
+    {
+      "text": "I replaced copied subtitles/dialogue with my own narration or paraphrased script.",
+      "checked": false
+    },
+    {
+      "text": "I removed Video Ori audio unless a short excerpt is necessary for commentary.",
+      "checked": false
+    },
+    {
+      "text": "Any background music I add is royalty-free or properly licensed.",
+      "checked": false
+    },
+    {
+      "text": "The final edit focuses on the core conflict, climax, resolution, and my own viewpoint.",
+      "checked": false
+    },
+    {
+      "text": "My narration changes the context by explaining meaning, themes, craft, or character choices.",
+      "checked": false
+    },
+    {
+      "text": "I will review platform and local legal guidance before publishing.",
+      "checked": false
+    },
+    {
+      "text": "I understand this checklist is guidance only and does not guarantee legal safety.",
+      "checked": false
+    }
+  ],
+  "scene_notes": [],
+  "script_text": "",
+  "script_language": "id",
+  "script_style": "recap",
+  "rough_hook_text": "",
+  "rough_cut_settings": {
+    "clip_seconds": 5,
+    "sample_every_seconds": 30,
+    "max_clips": 60,
+    "scene_output_seconds": 12,
+    "target_final_minutes": 12.0,
+    "target_percent": 12.0,
+    "slow_every_n_clips": 0,
+    "slow_factor": 1.2,
+    "hook_seconds": 5,
+    "use_video_hook": true,
+    "fill_with_neighbor_clips": true,
+    "keep_audio": false,
+    "zoom_percent": 4,
+    "mirror_every_n_clips": 2,
+    "transition_seconds": 0.15,
+    "color_grade": "review_warm",
+    "background_audio_path": "",
+    "background_audio_volume": 0.22,
+    "source_start_seconds": 0.0,
+    "source_end_seconds": 0.0
+  },
+  "rough_cut_parts": [],
+  "export_settings": {
+    "resolution": "1280x720",
+    "fps": 30.0,
+    "bitrate": "4500k",
+    "output_path": ""
+  },
+  "export_logs": [
+    "[2026-05-28 15:57:15] Added all 2 Manual Clip(s) to the timeline.",
+    "[2026-05-28 15:57:15] Added 1 Manual Clip(s) to the timeline."
+  ],
+  "created_at": "2026-05-28T15:57:15",
+  "updated_at": "2026-05-28T15:57:15"
+}
