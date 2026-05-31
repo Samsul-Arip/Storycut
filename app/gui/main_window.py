@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -24,7 +24,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QAbstractItemView,
     QScrollArea,
@@ -88,73 +87,13 @@ from app.gui.widgets import (
     VideoPreviewPanel,
     VideoCutEditorWidget,
 )
-
-
-TaskFunction = Callable[[Callable[[str], None]], Any]
-
-
-class TaskWorker(QThread):
-    progress = pyqtSignal(str)
-    succeeded = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, task: TaskFunction, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._task = task
-
-    def run(self) -> None:
-        try:
-            result = self._task(self.progress.emit)
-            self.succeeded.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class TaskProgressDialog(QDialog):
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(label)
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.setMinimumWidth(460)
-        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel(label)
-        title.setObjectName("PanelTitle")
-
-        self.message_label = QLabel("Preparing...")
-        self.message_label.setWordWrap(True)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setMinimumHeight(12)
-
-        self.detail_view = QTextEdit()
-        self.detail_view.setReadOnly(True)
-        self.detail_view.setMaximumHeight(128)
-        self.detail_view.setPlaceholderText("Progress details will appear here.")
-
-        note = QLabel("Keep StoryCut AI open while the export is running.")
-        note.setWordWrap(True)
-
-        layout.addWidget(title)
-        layout.addWidget(self.message_label)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.detail_view)
-        layout.addWidget(note)
-
-    def set_message(self, message: str) -> None:
-        text = str(message or "").strip()
-        if not text:
-            return
-        self.message_label.setText(text)
-        self.detail_view.append(text)
-        scrollbar = self.detail_view.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+from app.gui.tasking import TaskFunction, TaskProgressDialog, TaskWorker
+from app.viewmodels import (
+    EditorViewModel,
+    TimelineDurationConfig,
+    safe_project_filename,
+    time_for_filename,
+)
 
 
 class MainWindow(QMainWindow):
@@ -168,12 +107,10 @@ class MainWindow(QMainWindow):
         self.project: ProjectData | None = None
         self.database: TranscriptDatabase | None = None
         self.rough_cut_parts: list[dict[str, Any]] = []
+        self.editor_vm = EditorViewModel(history_limit=80)
         self._workers: list[TaskWorker] = []
         self._task_dialogs: dict[TaskWorker, TaskProgressDialog] = {}
         self._busy_count = 0
-        self._editor_undo_stack: list[dict[str, Any]] = []
-        self._editor_redo_stack: list[dict[str, Any]] = []
-        self._restoring_editor_history = False
 
         self._build_ui()
         self.refresh_shortcut = QShortcut(QKeySequence("F5"), self)
@@ -1329,9 +1266,7 @@ class MainWindow(QMainWindow):
             self._show_error(str(exc))
 
     def _safe_project_filename(self, name: str) -> str:
-        clean = "".join(char if char.isalnum() or char in " ._-" else "_" for char in name.strip())
-        clean = "_".join(clean.split()).strip("._- ")
-        return clean or "StoryCut_Project"
+        return safe_project_filename(name)
 
     def load_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -2432,50 +2367,22 @@ class MainWindow(QMainWindow):
         self._start_task("Exporting final video", task, done)
 
     def _timeline_with_output_durations(self, clips: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not clips:
-            return []
+        return self.editor_vm.timeline_with_output_durations(
+            clips,
+            self._timeline_duration_config(),
+        )
 
+    def _timeline_duration_config(self) -> TimelineDurationConfig:
         config = self._rough_cut_config()
-        target_remaining = max(0.0, float(config.target_final_seconds or 0))
-        scene_duration = max(0.1, float(config.scene_output_seconds or config.clip_seconds or 5))
-        hook_duration = max(0.1, float(config.hook_seconds or config.clip_seconds or 5))
-        seen_rough = False
-        normalized: list[dict[str, Any]] = []
-
-        for clip in clips:
-            item = dict(clip)
-            source_duration = self._clip_source_duration(item)
-            output_duration = self._clip_output_duration(item)
-
-            if output_duration <= 0:
-                if str(item.get("kind") or "") == "rough":
-                    role = str(item.get("timeline_role") or "")
-                    is_hook = role == "hook" or bool(item.get("is_hook"))
-                    planned = hook_duration if is_hook else scene_duration
-                    if target_remaining > 0:
-                        planned = min(planned, target_remaining)
-                    output_duration = max(0.1, planned)
-                else:
-                    output_duration = max(0.1, source_duration)
-
-            if str(item.get("kind") or "") == "rough":
-                seen_rough = True
-                if target_remaining > 0:
-                    target_remaining = max(0.0, target_remaining - output_duration)
-
-            item["output_duration"] = round(max(0.1, output_duration), 3)
-            normalized.append(item)
-
-        return normalized
+        return TimelineDurationConfig(
+            target_final_seconds=float(config.target_final_seconds or 0.0),
+            scene_output_seconds=float(config.scene_output_seconds or 0.0),
+            hook_seconds=float(config.hook_seconds or 0.0),
+            clip_seconds=float(config.clip_seconds or 0.0),
+        )
 
     def _timeline_total_duration(self, clips: list[dict[str, Any]]) -> float:
-        total = 0.0
-        for clip in clips:
-            output_duration = self._clip_output_duration(clip)
-            if output_duration <= 0:
-                output_duration = self._clip_source_duration(clip)
-            total += max(0.0, output_duration)
-        return total
+        return self.editor_vm.timeline_total_duration(clips)
 
     def _refresh_timeline_total_label(self) -> None:
         if not getattr(self, "timeline_total_label", None):
@@ -2487,35 +2394,13 @@ class MainWindow(QMainWindow):
         )
 
     def _clip_source_duration(self, clip: dict[str, Any]) -> float:
-        if self._is_photo_clip(clip):
-            return self._clip_output_duration(clip) or 3.0
-        try:
-            item = ClipItem.from_dict(clip)
-            return max(0.0, item.end - item.start)
-        except (TypeError, ValueError):
-            return 0.0
+        return self.editor_vm.clip_source_duration(clip)
 
     def _clip_output_duration(self, clip: dict[str, Any]) -> float:
-        for key in ("output_duration", "output_duration_seconds"):
-            try:
-                value = float(clip.get(key, 0.0) or 0.0)
-            except (TypeError, ValueError):
-                value = 0.0
-            if value > 0:
-                return value
-        if self._is_photo_clip(clip):
-            return 3.0
-        try:
-            slowmo = float(clip.get("slowmo_factor", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            slowmo = 1.0
-        if slowmo > 1.0:
-            return self._clip_source_duration(clip) * slowmo
-        return 0.0
+        return self.editor_vm.clip_output_duration(clip)
 
     def _is_photo_clip(self, clip: dict[str, Any]) -> bool:
-        kind = str(clip.get("media_type") or clip.get("kind") or "").strip().lower()
-        return kind in {"photo", "still", "image"} or bool(clip.get("image_path"))
+        return self.editor_vm.is_photo_clip(clip)
 
     def _export_settings_dict(self) -> dict[str, Any]:
         return {
@@ -2557,33 +2442,21 @@ class MainWindow(QMainWindow):
         timeline_clips = (
             self.timeline_table.timeline_clips() if getattr(self, "timeline_table", None) else []
         )
-        return {
-            "manual_clips": [dict(item) for item in manual_clips],
-            "timeline_clips": [dict(item) for item in timeline_clips],
-        }
+        return self.editor_vm.capture_state(manual_clips, timeline_clips)
 
     def _apply_editor_state(self, state: dict[str, Any]) -> None:
-        self._restoring_editor_history = True
-        try:
+        with self.editor_vm.restoring_history():
             self.cut_table.set_cut_items(list(state.get("manual_clips") or []))
             self.timeline_table.set_timeline_clips(list(state.get("timeline_clips") or []))
             self._refresh_timeline_total_label()
-        finally:
-            self._restoring_editor_history = False
 
     def _reset_editor_history(self) -> None:
-        self._editor_undo_stack = [self._capture_editor_state()]
-        self._editor_redo_stack = []
+        self.editor_vm.history.reset(self._capture_editor_state())
 
     def _push_editor_history(self) -> None:
-        if self._restoring_editor_history:
+        if self.editor_vm.is_restoring_history:
             return
-        state = self._capture_editor_state()
-        if self._editor_undo_stack and self._editor_undo_stack[-1] == state:
-            return
-        self._editor_undo_stack.append(state)
-        self._editor_undo_stack = self._editor_undo_stack[-80:]
-        self._editor_redo_stack.clear()
+        self.editor_vm.history.push(self._capture_editor_state())
 
     def _on_editor_timeline_changed(self) -> None:
         self._refresh_timeline_total_label()
@@ -2597,21 +2470,19 @@ class MainWindow(QMainWindow):
             self.save_project()
 
     def undo_editor_change(self) -> None:
-        if len(self._editor_undo_stack) < 2:
+        state = self.editor_vm.history.undo()
+        if state is None:
             self.statusBar().showMessage("Nothing to undo", 2500)
             return
-        current = self._editor_undo_stack.pop()
-        self._editor_redo_stack.append(current)
-        self._apply_editor_state(self._editor_undo_stack[-1])
+        self._apply_editor_state(state)
         self.save_project()
         self.statusBar().showMessage("Undo", 2500)
 
     def redo_editor_change(self) -> None:
-        if not self._editor_redo_stack:
+        state = self.editor_vm.history.redo()
+        if state is None:
             self.statusBar().showMessage("Nothing to redo", 2500)
             return
-        state = self._editor_redo_stack.pop()
-        self._editor_undo_stack.append(state)
         self._apply_editor_state(state)
         self.save_project()
         self.statusBar().showMessage("Redo", 2500)
@@ -2702,10 +2573,7 @@ class MainWindow(QMainWindow):
         return f"_{self._time_for_filename(start)}_to_{self._time_for_filename(end)}"
 
     def _time_for_filename(self, seconds: float) -> str:
-        total = int(round(max(0.0, seconds)))
-        hours, remainder = divmod(total, 3600)
-        minutes, secs = divmod(remainder, 60)
-        return f"{hours:02d}-{minutes:02d}-{secs:02d}"
+        return time_for_filename(seconds)
 
     def choose_subtitle_output_file(self) -> None:
         if not self._require_project():
